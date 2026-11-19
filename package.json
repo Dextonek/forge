@@ -1,0 +1,51 @@
+{
+  "name": "forge",
+  "version": "0.1.0",
+  "description": "Token-frugal Claude agent workbench for game development",
+  "main": "electron/main.mjs",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server/index.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "app": "electron .",
+    "dist": "electron-builder --win portable nsis"
+  },
+  "keywords": [],
+  "author": "Forge",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.328",
+    "ws": "^8.23.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0"
+  },
+  "productName": "Forge",
+  "build": {
+    "appId": "dev.forge.app",
+    "productName": "Forge",
+    "asar": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "server/**",
+      "public/**",
+      "electron/**",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "allowToChangeInstallationDirectory": true,
+      "oneClick": false
+    }
+  }
+}
