@@ -7,6 +7,7 @@ import { WebSocketServer } from 'ws';
 import { getState, save, newId, readEvents, readBrief, deleteThreadLog, appendEvent } from './store.mjs';
 import { undoFrom, deleteCheckpoints, threadChanges, rejectFile } from './checkpoints.mjs';
 import { lineDiff } from './diff.mjs';
+import { blenderStatus, blenderHolder } from './blender.mjs';
 import { usageStats } from './stats.mjs';
 import { saveShot, shotUrl, readShot, deleteShots } from './shots.mjs';
 import { detectEngine, isWebEngine, IGNORE_DIRS, refreshEngine } from './engine.mjs';
@@ -74,6 +75,10 @@ async function api(req, res, parts) {
   if (a === 'state' && m === 'GET') return json(res, 200, { projects: state.projects, threads: state.threads.map(publicThread), gamePort: GAME_PORT });
   if (a === 'usage' && m === 'GET') return json(res, 200, usageStats(state));
   if (a === 'models' && m === 'GET') return json(res, 200, await getModels(id === 'refresh'));
+  if (a === 'blender' && m === 'GET') {             // is Blender reachable, and which thread is using it
+    const s = await blenderStatus();
+    return json(res, 200, { ...s, holder: blenderHolder() });
+  }
   if (a === 'shots' && id && b && m === 'GET') {   // stored screenshots (verify, pick, playtest)
     const buf = readShot(id, b);
     if (!buf) return res.writeHead(404).end();
@@ -106,6 +111,12 @@ async function api(req, res, parts) {
       return json(res, 200, { ok: true });
     }
     if (b === 'assets' && m === 'GET') return json(res, 200, listAssets(project.path));
+    if (!b && m === 'PATCH') {                    // project settings (currently: the Blender switch)
+      const patch = await body(req);
+      if ('blender' in patch) project.blender = !!patch.blender;
+      save(); broadcast({ type: 'state' });
+      return json(res, 200, project);
+    }
     if (b === 'brief' && m === 'GET') return json(res, 200, { brief: readBrief(id) });
     if (b === 'brief' && m === 'POST') {
       try { return json(res, 200, await buildBrief(project)); } catch (e) { return json(res, 500, { error: e.message }); }

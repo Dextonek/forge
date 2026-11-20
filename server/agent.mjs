@@ -11,6 +11,14 @@ import { opusRatio, tierOf } from './models.mjs';
 import { beginTurn, backupFile, turnFiles } from './checkpoints.mjs';
 import { saveShot, shotUrl, readShot } from './shots.mjs';
 import { lineDiff } from './diff.mjs';
+import { blenderStatus, blenderServer, claimBlender, releaseBlender, BLENDER_AGENT } from './blender.mjs';
+
+// Blender MCP tools that only read or look (summaries, screenshots, docs): no approval needed.
+// Running Python in Blender (execute_blender_code) and anything that writes files still asks in Ask mode.
+const BLENDER_READ_ONLY = ['get_blendfile_summary_datablocks', 'get_blendfile_summary_missing_files', 'get_blendfile_summary_of_linked_libraries',
+  'get_blendfile_summary_path_info', 'get_blendfile_summary_usage_guess', 'get_object_detail_summary', 'get_objects_summary',
+  'get_python_api_docs', 'search_api_docs', 'search_manual_docs', 'get_screenshot_of_area_as_image', 'get_screenshot_of_window_as_image',
+  'get_screenshot_of_window_as_json'].map((t) => `mcp__blender__${t}`);
 
 // Permission modes offered in the UI (Claude Agent SDK names).
 export const PERM_MODES = ['default', 'acceptEdits', 'auto', 'plan', 'bypassPermissions'];
@@ -189,6 +197,7 @@ function systemAppend(project) {
     project.web ? '- After changing the game, call mcp__forge__verify_game (reloads the preview, returns runtime errors and a screenshot) and fix what it shows before you finish. Use mcp__forge__game_eval to inspect live state instead of guessing. To check gameplay (controls, menus, level-ups), use mcp__forge__playtest with a short input script and read steps.' : '',
     '- Project progress notes are kept with mcp__forge__progress (not in the game folder). Read them at the start of a new task if they are not already in the conversation; after finishing a feature or making a decision, write the updated notes.',
     '- If the project is nearly empty and has no progress notes, first write a short feature list with mcp__forge__progress, scaffold the game, then build the features one at a time.',
+    project.blender ? '- Blender is connected through the `blender` agent: delegate inspecting .blend scenes, viewport screenshots, model changes and exporting models to the game (glTF .glb) to it. Never ask it to open other files or save the .blend unless the user asked.' : '',
     '- Keep replies short: what changed, where, and anything the user must check.',
     brief ? `\n## Project brief\n${brief}` : '',
   ].filter(Boolean).join('\n');
@@ -203,7 +212,7 @@ const pending = new Map();   // approval reqId -> { resolve, threadId, suggestio
 
 function summarizeTool(name, input, cwd) {
   const i = input ?? {};
-  let v = String(i.file_path ?? i.path ?? i.pattern ?? i.command ?? i.description ?? i.prompt ?? '');
+  let v = String(i.file_path ?? i.path ?? i.pattern ?? i.command ?? i.code ?? i.description ?? i.prompt ?? '');
   if (cwd) v = v.split(cwd + '\\').join('').split(cwd + '/').join('').split(cwd).join('.'); // show project-relative paths
   return v.replace(/\s+/g, ' ').slice(0, 160);
 }
@@ -316,9 +325,17 @@ export async function runTurn({ thread, project, text, attachments = [], overrid
   const progress = !thread.sessionId ? readProgress(project.id) : '';
   // New game in an (almost) empty folder: ask for a feature list first, in the message (system-prompt
   // hints were ignored in testing).
+  // Blender (per-project switch): give the turn a Blender helper agent when Blender is reachable and free.
+  let agents = HELPERS, blenderNote = '', usingBlender = false;
+  if (project.blender) {
+    const st = await blenderStatus();
+    if (st.state !== 'ready') blenderNote = `[Forge: ${st.text}. If this task needs Blender, tell the user to start Blender with the MCP add-on server and try again.]`;
+    else if (!claimBlender(thread.id)) blenderNote = '[Forge: Blender is being used by another thread right now; do not use it in this turn.]';
+    else { agents = { ...HELPERS, blender: BLENDER_AGENT(blenderServer(), thread.cwd) }; usingBlender = true; }
+  }
   const fresh = !readProgress(project.id) && isNearlyEmpty(project.path)
     ? '[Forge: this project folder is (nearly) empty. First write a short goal and feature list with mcp__forge__progress (action "write"), then build the game, then check it with mcp__forge__verify_game.]' : '';
-  const modelText = [note && `[Forge note: ${note}]`, progress && `[Forge: project progress notes]\n${progress}`, fresh, ...picks.map(pickText), text].filter(Boolean).join('\n\n');
+  const modelText = [note && `[Forge note: ${note}]`, progress && `[Forge: project progress notes]\n${progress}`, fresh, blenderNote, ...picks.map(pickText), text].filter(Boolean).join('\n\n');
   const content = picks.length
     ? [{ type: 'text', text: modelText }, ...picks.map((a) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: readShot(thread.id, a.file).toString('base64') } }))]
     : modelText;
@@ -361,11 +378,11 @@ export async function runTurn({ thread, project, text, attachments = [], overrid
       systemPrompt: { type: 'preset', preset: 'claude_code', append: systemAppend(project) },
       tools: [...CORE_TOOLS, ...(thread.web ? WEB_TOOLS : []), ...(permissionMode === 'plan' ? ['ExitPlanMode'] : [])],
       disallowedTools: BINARY_GLOBS,
-      allowedTools: [...READ_ONLY, ...(thread.allowRules ?? [])],
+      allowedTools: [...READ_ONLY, ...(usingBlender ? BLENDER_READ_ONLY : []), ...(thread.allowRules ?? [])],
       permissionMode,
       ...(permissionMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {}),
       canUseTool,
-      agents: HELPERS,
+      agents,
       mcpServers: { forge: forgeTools(project, thread, turn, emit) },
       ...(budgetLeft ? { maxBudgetUsd: budgetLeft } : {}),
       abortController,
@@ -401,6 +418,7 @@ export async function runTurn({ thread, project, text, attachments = [], overrid
   const entry = { q, finish, abortController, turn, resultSeen: false, ended: new Promise((r) => { markEnded = r; }) };
   running.set(thread.id, entry);
   let gotResult = false;
+  const toolNames = new Map(); // tool_use id -> tool name (to label images tools return)
   broadcast({ type: 'running', threadId: thread.id, running: true });
 
   try {
@@ -422,11 +440,23 @@ export async function runTurn({ thread, project, text, attachments = [], overrid
         if (m.error) continue; // the result message reports it once
         for (const b of m.message.content ?? []) {
           if (b.type === 'text' && b.text.trim()) emit({ type: 'text', text: b.text, sub });
-          else if (b.type === 'tool_use' && b.name !== 'ExitPlanMode') emit({ type: 'tool', id: b.id, name: b.name, summary: summarizeTool(b.name, b.input, thread.cwd), sub });
+          if (b.type === 'tool_use') toolNames.set(b.id, b.name);
+          if (b.type === 'tool_use' && b.name !== 'ExitPlanMode') emit({ type: 'tool', id: b.id, name: b.name, summary: summarizeTool(b.name, b.input, thread.cwd), sub });
         }
       } else if (m.type === 'user' && Array.isArray(m.message.content)) {
         for (const b of m.message.content) {
-          if (b.type === 'tool_result') emit({ type: 'tool_result', id: b.tool_use_id, text: resultText(b.content).slice(0, 3000), isError: !!b.is_error, sub: m.parent_tool_use_id != null });
+          if (b.type === 'tool_result') {
+            emit({ type: 'tool_result', id: b.tool_use_id, text: resultText(b.content).slice(0, 3000), isError: !!b.is_error, sub: m.parent_tool_use_id != null });
+            // Images a tool returned (e.g. a Blender viewport screenshot seen by a helper): show them to the
+            // user too. Forge's own verify/playtest images are already shown, so only other tools count.
+            for (const c of Array.isArray(b.content) ? b.content : []) {
+              const data = c?.type === 'image' && (c.source?.data ?? c.data);
+              if (!data || toolNames.get(b.tool_use_id)?.startsWith('mcp__forge__')) continue;
+              const mt = c.source?.media_type ?? c.mimeType ?? 'image/png';
+              const file = saveShot(thread.id, `data:${mt.includes('jpeg') ? 'image/jpeg' : 'image/png'};base64,${data}`);
+              if (file) emit({ type: 'toolImage', id: b.tool_use_id, src: shotUrl(thread.id, file), tool: toolNames.get(b.tool_use_id) ?? '', sub: m.parent_tool_use_id != null });
+            }
+          }
         }
       } else if (m.type === 'result') {
         const turnUsage = recordTurnUsage(thread, m, { tier: route.tier, ctx: thread.lastContextTokens });
@@ -450,6 +480,7 @@ export async function runTurn({ thread, project, text, attachments = [], overrid
     for (const [id, p] of pending) if (p.entry === entry) { pending.delete(id); p.resolve({ behavior: 'deny', message: 'turn ended' }); }
     if (running.get(thread.id) === entry) running.delete(thread.id);
     markEnded();
+    if (usingBlender) releaseBlender(thread.id);
     try { onTurnEnd?.(); } catch { /* best effort */ }
     broadcast({ type: 'running', threadId: thread.id, running: isRunning(thread.id) });
   }

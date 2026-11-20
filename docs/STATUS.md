@@ -55,8 +55,25 @@ Phase 2 is merged into `main`.
 - The done-check is a nudge: when the user explicitly says "don't check", Claude may decline once and stop.
 - The release build is NOT rebuilt with this fix yet (the user's open Forge locks the release folder).
 
+## Blender helper (branch `feat/blender-helper`) — built and tested live (read-only)
+- Live tests with Blender 5.2.2 LTS (default scene): `scripts/blender-test.mjs` (file + objects via the helper,
+  read-only tools auto-allowed, $0.033) and `scripts/blender-shot-test.mjs` (viewport screenshot, $0.016).
+  Blender stayed unchanged (is_dirty false). Images that any non-Forge tool returns (e.g. Blender screenshots
+  seen by the helper) are now saved and shown in the chat.
+- Not tested yet: exporting a model (needs execute_blender_code, which asks for approval).
+- Uses the Blender MCP from the Claude desktop app's Blender extension
+  (`%APPDATA%\Claude\Claude Extensions\ant.dir.gh.blender.blender-mcp\.venv\Scripts\blender-mcp.exe`, or
+  `FORGE_BLENDER_MCP`). Blender's add-on server listens on localhost:9876 (`FORGE_BLENDER_PORT`).
+- Per-project switch (options menu → "Blender helper", or the hint in Assets when .blend files exist).
+- A `blender` helper agent (Sonnet) gets the Blender MCP server inline, so its tools never load into the main
+  conversation. One thread at a time (Blender is shared state). Read-only Blender tools auto-allowed;
+  execute_blender_code asks in Ask mode. The helper must not open other files or save the .blend unless asked;
+  exports go to `<game>/models/*.glb`.
+- Tested: "Blender not running" path with a real turn (`scripts/blender-test.mjs`) → clear message, no changes.
+- NOT tested yet: a live Blender session (Blender was not running; blender.exe not found in Program Files/PATH).
+
 ## Not started (needs the user's decision: other systems / network)
-- Blender MCP + asset pipeline, phone approvals (LAN/Tailscale, needs API auth), Godot/Unity via MCP.
+- Phone approvals (LAN/Tailscale, needs API auth), Godot/Unity via MCP.
 
 ## Next step
 Commit Phase 3 on `feat/phase-3-game-tools` after the user's OK.

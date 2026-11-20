@@ -277,6 +277,13 @@ function renderEvent(ev, replay = false) {
       return;
     }
     case 'info': { const a = ensureAct(); el.className = 'info'; el.textContent = ev.text; a.body.appendChild(el); return; }
+    case 'toolImage': {
+      const a = ensureAct();
+      el.className = 'shot' + (ev.sub ? ' sub' : '');
+      el.innerHTML = `<div class="dim small">${icon('image')} ${esc(ev.tool.replace(/^mcp__(\w+)__/, '$1: '))}</div><img src="${esc(ev.src)}" alt="Image returned by ${esc(ev.tool)}">`;
+      a.body.appendChild(el);
+      return;
+    }
     case 'playtest': {
       const a = ensureAct();
       el.className = 'shot';
@@ -473,7 +480,30 @@ $('#pickBtn').addEventListener('click', async () => {
   $('#pickBtn').classList.remove('on'); $('#pickBtn').querySelector('span').textContent = 'Pick';
 });
 $('#stop').addEventListener('click', () => api(`/api/threads/${current}/interrupt`, { method: 'POST' }));
-$('#optsBtn').addEventListener('click', () => { renderThreadUsage(); toggleMenu('#optsMenu'); });
+$('#optsBtn').addEventListener('click', () => { renderThreadUsage(); renderBlender(); toggleMenu('#optsMenu'); });
+
+// ---------------- Blender ----------------
+async function renderBlender() {
+  const p = projectOf(thread());
+  $('#optBlender').checked = !!p?.blender;
+  $('#blenderState').textContent = '…';
+  try {
+    const s = await api('/api/blender');
+    const busy = s.holder && s.holder !== current ? ' · in use by another thread' : '';
+    $('#blenderState').textContent = { ready: '· connected', 'not-running': '· Blender not running', 'not-installed': '· MCP not installed' }[s.state] + busy;
+    $('#blenderState').title = s.text;
+  } catch { $('#blenderState').textContent = ''; }
+}
+async function setBlender(on) {
+  const p = projectOf(thread());
+  if (!p) return;
+  p.blender = on;
+  await api(`/api/projects/${p.id}`, { method: 'PATCH', body: { blender: on } }).catch((err) => alert(err.message));
+  renderBlender();
+  if (tab === 'assets') loadTab();
+}
+$('#optBlender').addEventListener('change', (e) => setBlender(e.target.checked));
+$('#assets').addEventListener('click', (e) => { if (e.target.id === 'blendOn') setBlender(true); });
 
 async function handoff() {
   const t = thread();
@@ -603,9 +633,11 @@ async function loadTab() {
   if (tab === 'assets') {
     const list = (await api(`/api/projects/${p.id}/assets`)).filter((a) => a.kind !== 'code');
     const ic = { model: '🧊', audio: '🔊', font: '🔤', scene: '🎬', other: '📄', image: '🖼' };
-    $('#assets').innerHTML = list.length ? list.map((a) => `<div class="asset" title="${esc(a.path)} · ${Math.round(a.size / 1024)}KB">
+    const blends = list.filter((a) => /\.blend$/i.test(a.path)).length;
+    const hint = blends && !p.blender ? `<div class="blendHint">${blends} Blender file${blends === 1 ? '' : 's'} here. <button class="btn small" id="blendOn">Turn on the Blender helper</button><span class="dim small">Claude can then inspect your open Blender scene and export models into this game.</span></div>` : '';
+    $('#assets').innerHTML = hint + (list.length ? list.map((a) => `<div class="asset" title="${esc(a.path)} · ${Math.round(a.size / 1024)}KB">
       ${a.kind === 'image' && !/\.(psd|exr|hdr|ktx2)$/i.test(a.path) ? `<img loading="lazy" src="${gameBase()}/files/${p.id}/${a.path.split('/').map(encodeURIComponent).join('/')}" alt="">` : `<div class="ic">${ic[a.kind]}</div>`}
-      ${esc(a.path.split('/').pop())}</div>`).join('') : '<p class="dim small">No asset files found.</p>';
+      ${esc(a.path.split('/').pop())}</div>`).join('') : '<p class="dim small">No asset files found.</p>');
   } else if (tab === 'diff') {
     const d = await api(`/api/threads/${t.id}/changes`);
     $('#commitRow').hidden = !d.repo;
