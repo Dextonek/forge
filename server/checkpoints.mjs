@@ -54,7 +54,7 @@ export function undoFrom(threadId, turnId) {
   const restored = new Set();
   for (const m of turns) {
     for (const f of [...m.files].reverse()) {
-      if (!inside(m.cwd, f.path)) continue;
+      if (!inside(m.cwd, f.path) || f.rejected) continue; // a rejected file was already put back
       if (f.existed) {
         fs.mkdirSync(path.dirname(f.path), { recursive: true });
         fs.copyFileSync(path.join(root(threadId), m.turnId, f.backup), f.path);
@@ -67,6 +67,47 @@ export function undoFrom(threadId, turnId) {
     writeManifest(threadId, m);
   }
   return { turns: turns.map((m) => m.turnId), files: [...restored] };
+}
+
+// Net changes of a thread, per file: content before the first (still active) turn that touched it vs now.
+export function threadChanges(threadId) {
+  const byFile = new Map();
+  for (const m of listTurns(threadId)) {
+    if (m.undone) continue;
+    for (const f of m.files) {
+      if (f.rejected || byFile.has(f.path)) continue;
+      let original = null;
+      if (f.existed) { try { original = fs.readFileSync(path.join(root(threadId), m.turnId, f.backup), 'utf8'); } catch { original = ''; } }
+      byFile.set(f.path, { rel: f.rel, path: f.path, existed: f.existed, original, since: m.turnId });
+    }
+  }
+  return [...byFile.values()].map((c) => {
+    let current = null;
+    try { current = fs.readFileSync(c.path, 'utf8'); } catch { /* deleted */ }
+    return { ...c, current };
+  }).filter((c) => c.original !== c.current);
+}
+
+// Puts one file back as it was before the thread changed it, and marks it rejected in every active turn,
+// so a later Undo of any of those turns cannot bring the rejected change back.
+export function rejectFile(threadId, rel) {
+  const turns = listTurns(threadId).filter((m) => !m.undone);
+  let restored = false;
+  for (const m of turns) {
+    let touched = false;
+    for (const f of m.files) {
+      if (f.rel !== rel || f.rejected || !inside(m.cwd, f.path)) continue;
+      if (!restored) {
+        if (f.existed) { fs.mkdirSync(path.dirname(f.path), { recursive: true }); fs.copyFileSync(path.join(root(threadId), m.turnId, f.backup), f.path); }
+        else { try { fs.rmSync(f.path); } catch { /* gone */ } }
+        restored = true;
+      }
+      f.rejected = true; touched = true;
+    }
+    if (touched) writeManifest(threadId, m);
+  }
+  if (!restored) throw new Error('no change to reject for that file');
+  return { file: rel };
 }
 
 export function deleteCheckpoints(threadId) { try { fs.rmSync(root(threadId), { recursive: true, force: true }); } catch { /* none */ } }

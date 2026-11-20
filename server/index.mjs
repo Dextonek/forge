@@ -5,8 +5,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { getState, save, newId, readEvents, readBrief, deleteThreadLog, appendEvent } from './store.mjs';
-import { undoFrom, deleteCheckpoints } from './checkpoints.mjs';
+import { undoFrom, deleteCheckpoints, threadChanges, rejectFile } from './checkpoints.mjs';
+import { lineDiff } from './diff.mjs';
 import { usageStats } from './stats.mjs';
+import { saveShot, shotUrl, readShot, deleteShots } from './shots.mjs';
 import { detectEngine, isWebEngine, IGNORE_DIRS, refreshEngine } from './engine.mjs';
 import { repoRoot, createWorktree, diff, commit } from './git.mjs';
 import { serveGame, listAssets, pushError, getErrors, safeJoin, attachProbe, probeCommand } from './game.mjs';
@@ -72,6 +74,11 @@ async function api(req, res, parts) {
   if (a === 'state' && m === 'GET') return json(res, 200, { projects: state.projects, threads: state.threads.map(publicThread), gamePort: GAME_PORT });
   if (a === 'usage' && m === 'GET') return json(res, 200, usageStats(state));
   if (a === 'models' && m === 'GET') return json(res, 200, await getModels(id === 'refresh'));
+  if (a === 'shots' && id && b && m === 'GET') {   // stored screenshots (verify, pick, playtest)
+    const buf = readShot(id, b);
+    if (!buf) return res.writeHead(404).end();
+    return res.writeHead(200, { 'Content-Type': b.endsWith('.png') ? 'image/png' : 'image/jpeg', 'Cache-Control': 'max-age=86400' }).end(buf);
+  }
 
   if (a === 'projects' && !id && m === 'POST') {
     const { path: dir } = await body(req);
@@ -91,7 +98,7 @@ async function api(req, res, parts) {
     if (!project) return json(res, 404, { error: 'no project' });
     if (!b && m === 'DELETE') {          // forget the project in Forge; files on disk are not touched
       if (state.threads.some((t) => t.projectId === id && isRunning(t.id))) return json(res, 409, { error: 'a thread of this project is running' });
-      for (const t of state.threads.filter((x) => x.projectId === id)) { deleteThreadLog(t.id); deleteCheckpoints(t.id); }
+      for (const t of state.threads.filter((x) => x.projectId === id)) { deleteThreadLog(t.id); deleteCheckpoints(t.id); deleteShots(t.id); }
       state.threads = state.threads.filter((t) => t.projectId !== id);
       state.projects = state.projects.filter((p) => p.id !== id);
       watched.get(project.path)?.close(); watched.delete(project.path);
@@ -140,22 +147,40 @@ async function api(req, res, parts) {
     }
     if (!b && m === 'DELETE') {          // removes the thread and its chat log; a worktree folder is left on disk
       if (isRunning(id)) return json(res, 409, { error: 'thread is running' });
-      deleteThreadLog(id); deleteCheckpoints(id);
+      deleteThreadLog(id); deleteCheckpoints(id); deleteShots(id);
       state.threads = state.threads.filter((t) => t.id !== id);
       save(); broadcast({ type: 'state' });
       return json(res, 200, { ok: true, worktreeLeft: thread.worktree ? thread.cwd : null });
     }
     if (b === 'events' && m === 'GET') { checkEngine(project); return json(res, 200, readEvents(id)); }
     if (b === 'errors' && m === 'GET') return json(res, 200, getErrors(id));
-    if (b === 'shot' && m === 'POST') return json(res, 200, await probeCommand(id, 'shot')); // screenshot of the open preview
-    if (b === 'eval' && m === 'POST') { const { code } = await body(req); return json(res, 200, await probeCommand(id, 'eval', { code: String(code ?? '') })); }
+    if (b === 'shot' && m === 'POST') { const { role } = await body(req); return json(res, 200, await probeCommand(id, 'shot', {}, 8000, role ?? null)); }
+    if (b === 'eval' && m === 'POST') { const { code, role } = await body(req); return json(res, 200, await probeCommand(id, 'eval', { code: String(code ?? '') }, 8000, role ?? null)); }
+    if (b === 'pick' && m === 'POST') {           // let the user click something in the visible game preview
+      const r = await probeCommand(id, 'pick', {}, 65_000, 'visible');
+      if (r.cancelled || r.error) return json(res, 200, r);
+      const file = saveShot(id, r.image);
+      // Everything below came from the game page: keep it small and plain.
+      const objects = (Array.isArray(r.objects) ? r.objects : []).slice(0, 3).map((o) => ({
+        name: String(o.name ?? '').slice(0, 60), type: String(o.type ?? '').slice(0, 30), path: String(o.path ?? '').slice(0, 200),
+        geometry: String(o.geometry ?? '').slice(0, 40), color: /^#[0-9a-f]{6}$/i.test(o.color) ? o.color : null,
+        position: Array.isArray(o.position) ? o.position.slice(0, 3).map(Number) : null, size: Number(o.size) || null,
+      }));
+      return json(res, 200, { x: Number(r.x), y: Number(r.y), fx: Number(r.fx), fy: Number(r.fy), w: Number(r.w), h: Number(r.h), three: !!r.three, objects, file, src: shotUrl(id, file) });
+    }
+    if (b === 'unpick' && m === 'POST') return json(res, 200, await probeCommand(id, 'unpick', {}, 3000, 'visible'));
+    if (b === 'preview' && m === 'POST') {        // open the hidden, always-drawing preview (desktop app only)
+      if (!globalThis.forgeEnsurePreview) return json(res, 400, { error: 'hidden preview needs the desktop app' });
+      globalThis.forgeEnsurePreview(`http://127.0.0.1:${GAME_PORT}/play/${id}/?forge=hidden`);
+      return json(res, 200, { ok: true });
+    }
     if (b === 'message' && m === 'POST') {
-      const { text, tier } = await body(req);
+      const { text, tier, attachments } = await body(req);
       if (!text?.trim()) return json(res, 400, { error: 'empty message' });
       if (isRunning(id)) return json(res, 409, { error: 'thread is busy' });
       if (thread.title === 'New thread') { thread.title = text.trim().slice(0, 48); save(); broadcast({ type: 'thread', thread: publicThread(thread) }); }
       checkEngine(project);
-      runTurn({ thread, project, text: text.trim(), override: tier ?? 'auto', broadcast, onTurnEnd: () => checkEngine(project) })
+      runTurn({ thread, project, text: text.trim(), attachments: Array.isArray(attachments) ? attachments.slice(0, 4) : [], override: tier ?? 'auto', broadcast, onTurnEnd: () => checkEngine(project) })
         .catch((e) => broadcast({ type: 'event', threadId: id, ev: { type: 'error', text: e.message } }))
         .finally(() => broadcast({ type: 'thread', thread: publicThread(thread) }));
       return json(res, 202, { ok: true });
@@ -174,6 +199,22 @@ async function api(req, res, parts) {
         broadcast({ type: 'state' });
         return json(res, 200, publicThread(nt));
       } catch (e) { return json(res, 500, { error: e.message }); }
+    }
+    if (b === 'changes' && m === 'GET') {         // net changes of this thread per file, as diffs
+      const files = threadChanges(id).map((c) => ({ file: c.rel, isNew: !c.existed, deleted: c.current === null, ...lineDiff(c.original, c.current) }));
+      return json(res, 200, { files, repo: !!project.repo });
+    }
+    if (b === 'reject' && m === 'POST') {          // put one file back as it was before this thread
+      if (isRunning(id)) return json(res, 409, { error: 'wait until the thread is idle' });
+      const { file } = await body(req);
+      try {
+        rejectFile(id, String(file ?? ''));
+        thread.pendingNote = [thread.pendingNote, `The user rejected your changes to ${file}; it is back to how it was before this thread. Re-read it before changing it again.`].filter(Boolean).join(' ');
+        save();
+        const ev = { type: 'rejected', file, t: Date.now() };
+        appendEvent(id, ev); broadcast({ type: 'event', threadId: id, ev });
+        return json(res, 200, { ok: true });
+      } catch (e) { return json(res, 400, { error: e.message }); }
     }
     if (b === 'undo' && m === 'POST') {           // restore files to how they were before a turn
       if (isRunning(id)) return json(res, 409, { error: 'wait until the thread is idle' });
@@ -275,7 +316,8 @@ gameServer.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, `http://${HOST}`);
   const m = url.pathname.match(/^\/__probe\/([a-f0-9]+)$/);
   if (!m || !findThread(m[1]) || !GAME_ORIGINS.has(req.headers.origin)) { socket.destroy(); return; }
-  probeWss.handleUpgrade(req, socket, head, (ws) => attachProbe(m[1], ws, Number(url.searchParams.get('load')) || Date.now()));
+  const role = url.searchParams.get('role') === 'hidden' ? 'hidden' : 'visible';
+  probeWss.handleUpgrade(req, socket, head, (ws) => attachProbe(m[1], ws, Number(url.searchParams.get('load')) || Date.now(), role));
 });
 
 // Resolves once both servers listen; the desktop app awaits this before opening its window.

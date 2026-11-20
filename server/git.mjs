@@ -21,13 +21,15 @@ export async function createWorktree(projectPath, repo, threadId) {
   return path.join(wt, path.relative(path.resolve(repo), projectPath));
 }
 
+// Both are limited to the game folder ("-- ."): a game can live inside a bigger repository, and Forge
+// must never stage or commit files outside it.
 export async function diff(cwd) {
-  const tracked = await git(cwd, ['diff', 'HEAD', '--stat', '--patch', '--no-color']).catch(() => '');
-  const untracked = (await git(cwd, ['ls-files', '--others', '--exclude-standard']).catch(() => '')).trim();
+  const tracked = await git(cwd, ['diff', 'HEAD', '--stat', '--patch', '--no-color', '--', '.']).catch(() => '');
+  const untracked = (await git(cwd, ['ls-files', '--others', '--exclude-standard', '--', '.']).catch(() => '')).trim();
   return { patch: tracked, untracked: untracked ? untracked.split('\n') : [] };
 }
 
 export async function commit(cwd, message) {
-  await git(cwd, ['add', '-A']);
-  return git(cwd, ['commit', '-m', message]);
+  await git(cwd, ['add', '-A', '--', '.']);
+  return git(cwd, ['commit', '-m', message, '--', '.']);
 }

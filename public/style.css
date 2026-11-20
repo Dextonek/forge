@@ -135,10 +135,41 @@ body.desktop .winCtl { width: 138px; flex: none; } /* room for the Windows capti
 .planCard { background: var(--card); border: 1px solid var(--line2); border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
 .planCard .apLabel { display: flex; align-items: center; gap: 6px; }
 .planCard .apLabel .i { width: 14px; height: 14px; }
+/* diffs: Changes tab and approval cards */
+.cfile { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.cfHead { display: flex; align-items: center; gap: 8px; padding: 7px 10px; background: var(--elev); font-size: 12.5px; }
+.cfHead code { font: 12.5px ui-monospace, Consolas, monospace; color: var(--text); }
+.add { color: var(--add); } .del { color: var(--del); }
+.dview { font: 12px/1.5 ui-monospace, Consolas, monospace; overflow-x: auto; background: var(--bg); }
+.approval .dview { border: 1px solid var(--line); border-radius: 8px; max-height: 260px; overflow: auto; }
+.hunk { padding: 2px 0; }
+.hsep { color: var(--dim); text-align: center; font-size: 11px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--card); }
+.dl { display: flex; white-space: pre; position: relative; flex-wrap: wrap; }
+.dl.add { background: rgba(63, 185, 80, .12); color: #9be9a8; }
+.dl.del { background: rgba(248, 81, 73, .12); color: #ffa198; }
+.dl.cl { cursor: pointer; } .dl.cl:hover { outline: 1px solid var(--line2); }
+.dl .ln { width: 40px; text-align: right; padding-right: 8px; color: var(--dim); flex: none; user-select: none; }
+.dl .mk { width: 14px; flex: none; color: var(--dim); }
+.dl .tx { flex: 1; min-width: 0; }
+.cbox { flex-basis: 100%; display: flex; gap: 6px; padding: 6px 8px 6px 54px; white-space: normal; background: var(--card); }
+.cbox input { flex: 1; font: 12.5px system-ui; }
+#changes { display: flex; flex-direction: column; gap: 10px; }
+.attach { display: flex; flex-wrap: wrap; gap: 6px; }
+.chipPick { display: inline-flex; align-items: center; gap: 8px; background: var(--elev); border: 1px solid var(--line2); border-radius: 10px; padding: 4px 4px 4px 4px; font-size: 12.5px; color: var(--muted); max-width: 320px; }
+.chipPick img { width: 56px; height: 36px; object-fit: cover; border-radius: 6px; }
+.chipPick span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chipPick .ib { width: 22px; height: 22px; }
+.userPicks { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; white-space: normal; }
+.userPicks .chipPick { background: var(--card); }
+#pickBtn.on { color: var(--warn); }
 .shot { display: flex; flex-direction: column; gap: 4px; margin: 4px 0; }
 .shot img { max-width: 320px; border-radius: 8px; border: 1px solid var(--line2); }
 .shot .i { width: 12px; height: 12px; vertical-align: -1px; }
 .errTxt { color: var(--bad); }
+.ptLog { font: 12px/1.5 ui-monospace, Consolas, monospace; color: var(--muted); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 0; white-space: pre-wrap; }
+.ptShots { display: flex; flex-wrap: wrap; gap: 8px; }
+.ptShots figure { margin: 0; } .ptShots img { width: 200px; border-radius: 8px; border: 1px solid var(--line2); display: block; }
+.ptShots figcaption { font-size: 11.5px; color: var(--dim); margin-top: 2px; }
 .warnTxt { color: var(--warn); }
 #ctxInfo a { color: var(--warn); text-decoration: underline; }
 .planBtns { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; }

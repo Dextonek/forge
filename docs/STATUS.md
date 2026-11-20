@@ -26,8 +26,28 @@ Builds go to `release\` (git-ignored); rebuild with `npm run dist`.
   not worth the risk.
 - Testing uses `FORGE_PORT=4417`, `FORGE_DATA=.testdata`, `FORGE_PROFILE=.testprofile` (all git-ignored).
 
+Phase 2 is merged into `main`.
+
+## Phase 3 (branch `feat/phase-3-game-tools`) — done and tested with real Haiku turns
+- Probe sockets have a role: `visible` (Play tab) or `hidden` (offscreen preview, URL `?forge=hidden`).
+- Pick in game: "Pick" button → click in the Play tab (Esc cancels) → chip with a crosshair-marked screenshot and,
+  for three.js, the objects under the click (via three's `__THREE_DEVTOOLS__` hook). Sent only with your next
+  message, as labelled data. Test: `scripts/pick-test.mjs` → "Mesh, BoxGeometry, #ff7a1a at the origin".
+- Review: Changes tab built on Forge's checkpoints (works without git): net diff per file, Reject per file
+  (also blocks later Undo from bringing it back — `scripts/reject-test.mjs`), click a line to comment into the
+  message. Ask-mode approval cards show Edit/Write/MultiEdit as a diff. Git diff/commit limited to the game
+  folder (`-- .`). Test: `scripts/review-test.mjs`.
+- Playtest tool (hidden preview, desktop app only, auto-allowed: keys, holds, clicks, waits, plain-path reads,
+  ≤4 screenshots). Test on a copy of the user's RougeLikeSurvival: Enter → S "play", hold D 1 s → G.p.x 0 → 190,
+  verdict PASS (`scripts/playtest-test.mjs`).
+- Screenshots are stored as files (`data/shots/<thread>/`) and served at `/api/shots/...`.
+- Regression (perm-test, verify-test, reject-test, router test) pass.
+
+## Not started (needs the user's decision: other systems / network)
+- Blender MCP + asset pipeline, phone approvals (LAN/Tailscale, needs API auth), Godot/Unity via MCP.
+
 ## Next step
-Commit Phase 2 on `feat/phase-2-harness` (waiting for the user's OK), then Phase 3 (pick-in-game first).
+Commit Phase 3 on `feat/phase-3-game-tools` after the user's OK.
 
 ## Done and verified
 - Desktop app (Electron): `npm run app` and the packaged `release\win-unpacked\Forge.exe` start, show the native

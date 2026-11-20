@@ -32,6 +32,7 @@
     <symbol id="i-doc" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></symbol>
     <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M6 6l12 12M18 6 6 18"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
     <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
     <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
     <symbol id="i-unlock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/></symbol>
@@ -78,9 +79,11 @@
 <main id="main">
   <section id="log"><div class="col" id="col"></div></section>
   <form id="composer" class="composer" hidden>
+    <div id="attach" class="attach" hidden></div>
     <textarea id="msg" rows="2" placeholder="Ask for a change to your game…"></textarea>
     <div class="cRow">
       <button type="button" class="ib" id="optsBtn" title="Thread options"><svg class="i"><use href="#i-sliders"/></svg></button>
+      <button type="button" class="pillBtn" id="pickBtn" title="Click something in the running game to talk about it"><svg class="i"><use href="#i-target"/></svg><span>Pick</span></button>
       <span id="ctxInfo" class="dim small"></span>
       <span class="grow"></span>
       <span id="routeHint" class="dim small"></span>
@@ -116,8 +119,9 @@
     </div>
     <div id="tab-assets" class="tab" hidden><div id="assets"></div></div>
     <div id="tab-diff" class="tab" hidden>
-      <div class="row"><input id="commitMsg" placeholder="Commit message"><button class="btn" id="commit">Commit</button><button class="btn" id="refreshDiff">Refresh</button></div>
-      <pre id="diff" class="diff"></pre>
+      <div class="row"><span class="dim small grow">Changes this thread made. Click a line to comment on it.</span><button class="btn small" id="refreshDiff">Refresh</button></div>
+      <div id="changes"></div>
+      <div class="row" id="commitRow" hidden><input id="commitMsg" placeholder="Commit message (game folder only)"><button class="btn" id="commit">Commit</button></div>
     </div>
     <div id="tab-brief" class="tab" hidden>
       <p class="dim small">A ~250-word summary written once by Haiku and sent (cached) with every turn, so the expensive model stops re-exploring your project.</p>

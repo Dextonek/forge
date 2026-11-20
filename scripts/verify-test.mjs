@@ -46,7 +46,7 @@ for (const c of cases) {
   const guard = ev.some((e) => e.type === 'info' && /Done-check/.test(e.text));
   console.log(`\n${c.name}\n   tools: ${tools.join(', ')}\n   done-check fired: ${guard} · shots: ${shots.length} · ${end.type}${end.isError ? ' ' + end.text : ''}`);
   for (const s of shots) {
-    if (s.image) { const f = path.join(out, `verify-${++i}.jpg`); fs.writeFileSync(f, Buffer.from(s.image.split(',')[1], 'base64')); console.log(`   screenshot saved: ${f} (${s.errors} errors)`); }
+    if (s.src) { const img = await fetch(B + s.src, { headers: { Origin: B } }); const f = path.join(out, `verify-${++i}.jpg`); fs.writeFileSync(f, Buffer.from(await img.arrayBuffer())); console.log(`   screenshot saved: ${f} (${s.errors} errors)`); }
     else console.log(`   no screenshot: ${s.note}`);
   }
   const reply = ev.filter((e) => e.type === 'text' && !e.sub).map((e) => e.text).join(' ').replace(/\s+/g, ' ').slice(0, 220);

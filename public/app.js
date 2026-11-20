@@ -208,6 +208,7 @@ async function openThread(id) {
   renderThreadUsage(); renderPills(); setRunning(t.running);
   $('#col').innerHTML = '';
   live = null; liveText = '';
+  picks = []; renderPicks();
   toolEls.clear();
   const events = await api(`/api/threads/${id}/events`);
   if (!events.length) $('#col').innerHTML = `<div class="empty"><b>${esc(projectOf(t)?.name)}</b><br>Ask for a change, a fix or a new feature.<br><span class="small">Quick tweaks go to Haiku, normal work to Sonnet, hard problems to Opus.</span></div>`;
@@ -265,6 +266,7 @@ function renderEvent(ev, replay = false) {
     case 'user': {
       act = null;
       el.className = 'user'; el.textContent = ev.text;
+      if (ev.picks?.length) el.insertAdjacentHTML('afterbegin', `<div class="userPicks">${ev.picks.map((p) => `<span class="chipPick"><img src="${esc(p.src)}" alt=""><span>${esc(p.label)}</span></span>`).join('')}</div>`);
       col().appendChild(el);
       const meta = document.createElement('div');
       meta.className = 'userMeta';
@@ -275,11 +277,20 @@ function renderEvent(ev, replay = false) {
       return;
     }
     case 'info': { const a = ensureAct(); el.className = 'info'; el.textContent = ev.text; a.body.appendChild(el); return; }
+    case 'playtest': {
+      const a = ensureAct();
+      el.className = 'shot';
+      el.innerHTML = `<div class="dim small">${icon('play')} Playtest · ${ev.steps.length} steps${ev.errors ? ` · <span class="errTxt">${ev.errors} runtime error${ev.errors === 1 ? '' : 's'}</span>` : ''}</div>
+        <pre class="ptLog">${esc(ev.steps.join('\n'))}</pre>
+        <div class="ptShots">${(ev.shots ?? []).map((s) => `<figure><img src="${esc(s.src)}" alt=""><figcaption>${esc(s.label)}</figcaption></figure>`).join('')}</div>`;
+      a.body.appendChild(el);
+      return;
+    }
     case 'shot': {
       // What Claude saw when it checked the game: shown inside the turn's activity group.
       const a = ensureAct();
       el.className = 'shot';
-      el.innerHTML = `<div class="dim small">${icon('play')} Checked the game · ${ev.errors ? `<span class="errTxt">${ev.errors} runtime error${ev.errors === 1 ? '' : 's'}</span>` : 'no runtime errors'}${ev.warnings ? ` · ${ev.warnings} warning${ev.warnings === 1 ? '' : 's'}` : ''}</div>${ev.image ? `<img src="${ev.image}" alt="Screenshot Claude took of the game">` : `<div class="dim small">No screenshot: ${esc(ev.note)}</div>`}`;
+      el.innerHTML = `<div class="dim small">${icon('play')} Checked the game · ${ev.errors ? `<span class="errTxt">${ev.errors} runtime error${ev.errors === 1 ? '' : 's'}</span>` : 'no runtime errors'}${ev.warnings ? ` · ${ev.warnings} warning${ev.warnings === 1 ? '' : 's'}` : ''}</div>${ev.src || ev.image ? `<img src="${esc(ev.src ?? ev.image)}" alt="Screenshot Claude took of the game">` : `<div class="dim small">No screenshot: ${esc(ev.note)}</div>`}`;
       a.body.appendChild(el);
       return;
     }
@@ -313,7 +324,8 @@ function renderEvent(ev, replay = false) {
       break;
     case 'approval':
       el.className = 'approval'; el.dataset.req = ev.reqId;
-      el.innerHTML = `<div class="apLabel">Approval needed</div><div class="apTool">${esc(ev.tool)}</div><div class="apCmd">${esc(ev.summary)}</div>
+      el.innerHTML = `<div class="apLabel">Approval needed</div><div class="apTool">${esc(ev.tool)}</div><div class="apCmd">${esc(ev.summary)}${ev.diff ? ` · <span class="add">+${ev.diff.added}</span> <span class="del">−${ev.diff.removed}</span>` : ''}</div>
+        ${ev.diff ? diffHtml(ev.diff) : ''}
         <details><summary>details</summary><pre>${esc(ev.input)}</pre></details>
         <div class="apBtns"><button class="apAllow" data-d="allow">Allow once</button><button class="apAlways" data-d="always">Allow for this thread</button><button class="apDeny" data-d="deny">Decline</button></div>`;
       break;
@@ -354,6 +366,10 @@ function renderEvent(ev, replay = false) {
       }
       el.className = 'turnMeta';
       el.innerHTML = `↺ Undid ${ev.turns?.length ?? 1} turn${ev.turns?.length === 1 ? '' : 's'} · restored ${ev.files?.length ? ev.files.map((f) => `<code>${esc(f)}</code>`).join(' ') : 'nothing'}. Claude will be told on your next message.`;
+      break;
+    case 'rejected':
+      el.className = 'turnMeta';
+      el.innerHTML = `✕ Rejected this thread's changes to <code>${esc(ev.file)}</code>; it is back to how it was. Claude will be told on your next message.`;
       break;
     case 'error': el.className = 'error'; el.textContent = ev.text; break;
     default: return;
@@ -421,9 +437,40 @@ $('#composer').addEventListener('submit', async (e) => {
   const text = $('#msg').value.trim();
   if (!text || !current) return;
   try {
-    await api(`/api/threads/${current}/message`, { method: 'POST', body: { text } });
-    $('#msg').value = ''; updateRouteHint(); setRunning(true);
+    await api(`/api/threads/${current}/message`, { method: 'POST', body: { text, attachments: picks.map((p) => ({ kind: 'pick', ...p })) } });
+    $('#msg').value = ''; picks = []; renderPicks(); updateRouteHint(); setRunning(true);
   } catch (err) { alert(err.message); }
+});
+
+// ---------------- pick in game ----------------
+// Click "Pick", then click something in the Play tab: Forge attaches a marked screenshot and (for three.js)
+// the object under the click to your next message. Nothing is sent until you press Send.
+let picks = [];
+function renderPicks() {
+  $('#attach').hidden = !picks.length;
+  $('#attach').innerHTML = picks.map((p, i) => {
+    const o = p.objects?.[0];
+    const label = o ? `${o.type}${o.name ? ` “${o.name}”` : ''}${o.color ? ` · ${o.color}` : ''}` : `point ${p.x}, ${p.y}`;
+    return `<span class="chipPick"><img src="${esc(p.src)}" alt=""><span>${esc(label)}</span><button type="button" class="ib" data-unpick="${i}" title="Remove">${icon('x')}</button></span>`;
+  }).join('');
+}
+$('#attach').addEventListener('click', (e) => { const b = e.target.closest('[data-unpick]'); if (b) { picks.splice(Number(b.dataset.unpick), 1); renderPicks(); } });
+let picking = false;
+$('#pickBtn').addEventListener('click', async () => {
+  if (!current) return;
+  if (picking) { picking = false; api(`/api/threads/${current}/unpick`, { method: 'POST' }); return; }
+  if (!projectOf(thread())?.web) return alert('Pick works with browser games shown in the Play tab.');
+  setPanel(true);
+  document.querySelector('.tabs button[data-tab="play"]').click();
+  picking = true;
+  $('#pickBtn').classList.add('on'); $('#pickBtn').querySelector('span').textContent = 'Click in the game… (Esc)';
+  try {
+    const r = await api(`/api/threads/${current}/pick`, { method: 'POST' });
+    if (r.error) alert(r.error);
+    else if (!r.cancelled) { picks.push(r); renderPicks(); $('#msg').focus(); }
+  } catch (err) { alert(err.message); }
+  picking = false;
+  $('#pickBtn').classList.remove('on'); $('#pickBtn').querySelector('span').textContent = 'Pick';
 });
 $('#stop').addEventListener('click', () => api(`/api/threads/${current}/interrupt`, { method: 'POST' }));
 $('#optsBtn').addEventListener('click', () => { renderThreadUsage(); toggleMenu('#optsMenu'); });
@@ -560,16 +607,48 @@ async function loadTab() {
       ${a.kind === 'image' && !/\.(psd|exr|hdr|ktx2)$/i.test(a.path) ? `<img loading="lazy" src="${gameBase()}/files/${p.id}/${a.path.split('/').map(encodeURIComponent).join('/')}" alt="">` : `<div class="ic">${ic[a.kind]}</div>`}
       ${esc(a.path.split('/').pop())}</div>`).join('') : '<p class="dim small">No asset files found.</p>';
   } else if (tab === 'diff') {
-    const d = await api(`/api/threads/${t.id}/diff`);
-    if (d.noRepo) { $('#diff').textContent = 'This project is not a git repository, so there is no diff. (Forge never runs git init for you.)'; return; }
-    $('#diff').innerHTML = (d.untracked.length ? `<span class="add">untracked:\n  ${d.untracked.map(esc).join('\n  ')}</span>\n\n` : '') +
-      (esc(d.patch) || 'No changes.').split('\n').map((l) => (/^\+(?!\+\+)/.test(l) ? `<span class="add">${l}</span>` : /^-(?!--)/.test(l) ? `<span class="del">${l}</span>` : l)).join('\n');
+    const d = await api(`/api/threads/${t.id}/changes`);
+    $('#commitRow').hidden = !d.repo;
+    $('#changes').innerHTML = d.files.length ? d.files.map((f) => `<div class="cfile" data-file="${esc(f.file)}">
+      <div class="cfHead"><code>${esc(f.file)}</code>${f.isNew ? '<span class="pill">new</span>' : ''}${f.deleted ? '<span class="pill">deleted</span>' : ''}
+        <span class="add">+${f.added}</span><span class="del">−${f.removed}</span><span class="grow"></span>
+        <button class="btn small" data-reject="${esc(f.file)}" title="Put this file back as it was before this thread">Reject</button></div>
+      ${f.tooLarge ? '<div class="dim small">Too large to show line by line.</div>' : diffHtml(f, true)}</div>`).join('')
+      : '<p class="dim small">No changes in this thread (or they were undone).</p>';
   } else if (tab === 'brief') {
     const { brief } = await api(`/api/projects/${p.id}/brief`);
     $('#brief').textContent = brief ?? 'No brief yet. Building one costs a fraction of a cent of Haiku once and saves exploration on every later turn.';
   }
 }
 $('#refreshDiff').addEventListener('click', loadTab);
+
+// Diff rendering shared by the Changes tab and approval cards.
+function diffHtml(d, commentable = false) {
+  if (!d?.hunks?.length) return '';
+  return `<div class="dview">${d.hunks.map((h) => `<div class="hunk">${h.map((op) => `<div class="dl ${op.t === '+' ? 'add' : op.t === '-' ? 'del' : ''}${commentable && op.t !== '-' ? ' cl' : ''}" data-line="${op.n ?? ''}" data-text="${esc(op.text)}"><span class="ln">${op.t === '-' ? op.o : op.n}</span><span class="mk">${op.t}</span><span class="tx">${esc(op.text) || ' '}</span></div>`).join('')}</div>`).join('<div class="hsep">⋯</div>')}</div>`;
+}
+$('#changes').addEventListener('click', async (e) => {
+  const rj = e.target.closest('[data-reject]');
+  if (rj) {
+    if (!confirm(`Reject all of this thread's changes to ${rj.dataset.reject}?\nThe file goes back to how it was before the thread. Claude is told on your next message.`)) return;
+    try { await api(`/api/threads/${current}/reject`, { method: 'POST', body: { file: rj.dataset.reject } }); loadTab(); } catch (err) { alert(err.message); }
+    return;
+  }
+  // Comment on a line: adds a quoted note to the message box (sent only when you press Send).
+  const line = e.target.closest('.dl.cl');
+  if (!line || line.querySelector('.cbox') || e.target.closest('.cbox')) return;
+  const file = line.closest('.cfile').dataset.file;
+  line.insertAdjacentHTML('beforeend', `<div class="cbox"><input placeholder="Comment on this line…"><button class="btn small">Add to message</button></div>`);
+  const box = line.querySelector('.cbox'), input = box.querySelector('input');
+  input.focus();
+  const add = () => {
+    const c = input.value.trim();
+    if (c) { const t = $('#msg'); t.value = `${t.value ? t.value.trimEnd() + '\n' : ''}In ${file} line ${line.dataset.line} (\`${line.dataset.text.trim().slice(0, 120)}\`): ${c}`; updateRouteHint(); t.focus(); }
+    box.remove();
+  };
+  box.querySelector('button').addEventListener('click', (ev) => { ev.stopPropagation(); add(); });
+  input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') add(); if (ev.key === 'Escape') box.remove(); });
+});
 $('#commit').addEventListener('click', async () => {
   try { await api(`/api/threads/${current}/commit`, { method: 'POST', body: { message: $('#commitMsg').value } }); $('#commitMsg').value = ''; loadTab(); }
   catch (err) { alert(err.message); }

@@ -55,7 +55,7 @@ failure — not re-route every message.
    (run JS in the preview: scene object count, FPS, player position) instead of many small tools; trim long
    command output with a hook.
 
-### Phase 3 — things nobody does well for games
+### Phase 3 — things nobody does well for games — 10, 11 and 14 DONE; 12, 13 and 15 wait for a decision
 10. **Pick-in-game**: click an object in the preview → Forge sends its three.js name, position and source
     location to the chat ("make *this* bigger"). Game version of Superset's design mode.
 11. **Playtest agent**: scripted input + screenshots + a pass/fail verdict per feature in the progress file.
