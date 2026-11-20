@@ -7,10 +7,10 @@ import { WebSocketServer } from 'ws';
 import { getState, save, newId, readEvents, readBrief, deleteThreadLog, appendEvent } from './store.mjs';
 import { undoFrom, deleteCheckpoints } from './checkpoints.mjs';
 import { usageStats } from './stats.mjs';
-import { detectEngine, isWebEngine, IGNORE_DIRS } from './engine.mjs';
+import { detectEngine, isWebEngine, IGNORE_DIRS, refreshEngine } from './engine.mjs';
 import { repoRoot, createWorktree, diff, commit } from './git.mjs';
-import { serveGame, listAssets, pushError, getErrors, safeJoin } from './game.mjs';
-import { runTurn, answerApproval, interrupt, buildBrief, isRunning, awaitingCount, PERM_MODES } from './agent.mjs';
+import { serveGame, listAssets, pushError, getErrors, safeJoin, attachProbe, probeCommand } from './game.mjs';
+import { runTurn, answerApproval, interrupt, buildBrief, isRunning, awaitingCount, PERM_MODES, summarizeThread } from './agent.mjs';
 import { getModels } from './models.mjs';
 
 const HOST = '127.0.0.1';
@@ -51,6 +51,16 @@ async function body(req) {
   let raw = '';
   for await (const chunk of req) { raw += chunk; if (raw.length > 1e6) throw new Error('body too large'); }
   try { return raw ? JSON.parse(raw) : {}; } catch { return {}; }
+}
+// Re-detects the engine (e.g. an empty folder that now holds index.html) and turns on preview + watching.
+function checkEngine(project) {
+  if (!project || !refreshEngine(project)) return;
+  save();
+  if (project.web) {
+    watchDir(project.path, project.id);
+    for (const t of state.threads) if (t.projectId === project.id && t.cwd !== project.path) watchDir(t.cwd, project.id);
+  }
+  broadcast({ type: 'state' });
 }
 const publicThread = (t) => ({ ...t, running: isRunning(t.id), awaiting: awaitingCount(t.id) });
 
@@ -93,7 +103,6 @@ async function api(req, res, parts) {
     if (b === 'brief' && m === 'POST') {
       try { return json(res, 200, await buildBrief(project)); } catch (e) { return json(res, 500, { error: e.message }); }
     }
-    if (b === 'errors' && m === 'GET') return json(res, 200, getErrors(id));
   }
 
   if (a === 'threads' && !id && m === 'POST') {
@@ -136,18 +145,36 @@ async function api(req, res, parts) {
       save(); broadcast({ type: 'state' });
       return json(res, 200, { ok: true, worktreeLeft: thread.worktree ? thread.cwd : null });
     }
-    if (b === 'events' && m === 'GET') return json(res, 200, readEvents(id));
+    if (b === 'events' && m === 'GET') { checkEngine(project); return json(res, 200, readEvents(id)); }
+    if (b === 'errors' && m === 'GET') return json(res, 200, getErrors(id));
+    if (b === 'shot' && m === 'POST') return json(res, 200, await probeCommand(id, 'shot')); // screenshot of the open preview
+    if (b === 'eval' && m === 'POST') { const { code } = await body(req); return json(res, 200, await probeCommand(id, 'eval', { code: String(code ?? '') })); }
     if (b === 'message' && m === 'POST') {
       const { text, tier } = await body(req);
       if (!text?.trim()) return json(res, 400, { error: 'empty message' });
       if (isRunning(id)) return json(res, 409, { error: 'thread is busy' });
       if (thread.title === 'New thread') { thread.title = text.trim().slice(0, 48); save(); broadcast({ type: 'thread', thread: publicThread(thread) }); }
-      runTurn({ thread, project, text: text.trim(), override: tier ?? 'auto', broadcast })
+      checkEngine(project);
+      runTurn({ thread, project, text: text.trim(), override: tier ?? 'auto', broadcast, onTurnEnd: () => checkEngine(project) })
         .catch((e) => broadcast({ type: 'event', threadId: id, ev: { type: 'error', text: e.message } }))
         .finally(() => broadcast({ type: 'thread', thread: publicThread(thread) }));
       return json(res, 202, { ok: true });
     }
     if (b === 'interrupt' && m === 'POST') return json(res, 200, { ok: await interrupt(id) });
+    if (b === 'handoff' && m === 'POST') {        // new thread that starts from a summary of this one
+      if (isRunning(id)) return json(res, 409, { error: 'wait until the thread is idle' });
+      try {
+        const { note, costUsd } = await summarizeThread(project, thread, readEvents(id));
+        const nt = { id: newId(), projectId: thread.projectId, title: `↳ ${thread.title}`.slice(0, 60), cwd: thread.cwd, worktree: thread.worktree,
+          created: Date.now(), web: thread.web, budgetUsd: thread.budgetUsd, model: thread.model, effort: thread.effort, permMode: thread.permMode,
+          pendingNote: `This thread continues an earlier one ("${thread.title}"). Handoff note:\n${note}` };
+        state.threads.push(nt); save();
+        const ev = { type: 'handoff', from: thread.title, note, costUsd, t: Date.now() };
+        appendEvent(nt.id, ev);
+        broadcast({ type: 'state' });
+        return json(res, 200, publicThread(nt));
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    }
     if (b === 'undo' && m === 'POST') {           // restore files to how they were before a turn
       if (isRunning(id)) return json(res, 409, { error: 'wait until the thread is idle' });
       const { turnId } = await body(req);
@@ -220,7 +247,7 @@ const gameServer = http.createServer((req, res) => {
     let raw = '';
     req.on('data', (c) => { raw += c; if (raw.length > 1e5) req.destroy(); });
     req.on('end', () => {
-      try { if (findProject(parts[1])) { const e = JSON.parse(raw); pushError(parts[1], e); broadcast({ type: 'gameError', projectId: parts[1], e }); } } catch { /* junk */ }
+      try { if (findThread(parts[1])) { const e = JSON.parse(raw); pushError(parts[1], e); broadcast({ type: 'gameError', threadId: parts[1], e }); } } catch { /* junk */ }
       res.writeHead(204).end();
     });
     return;
@@ -230,14 +257,25 @@ const gameServer = http.createServer((req, res) => {
     const thread = findThread(parts[1]);
     if (!thread) return res.writeHead(404).end();
     if (parts.length === 2 && !url.pathname.endsWith('/')) return res.writeHead(302, { Location: url.pathname + '/' }).end();
-    return serveGame(res, thread.cwd, thread.projectId, parts.slice(2).join('/'));
+    return serveGame(res, thread.cwd, thread.id, parts.slice(2).join('/'));
   }
-  if (parts[0] === 'files' && parts[1]) {        // raw asset files for thumbnails
+  if (parts[0] === 'files' && parts[1]) {        // raw asset files for thumbnails (no probe)
     const project = findProject(parts[1]);
     if (!project) return res.writeHead(404).end();
-    return serveGame(res, project.path, project.id, parts.slice(2).join('/'));
+    return serveGame(res, project.path, project.id, parts.slice(2).join('/'), false);
   }
   res.writeHead(404).end();
+});
+
+// Probe sockets from game pages (/__probe/<threadId>?load=<ms>). Only pages served by this game
+// server can connect: the Origin must be the game server itself.
+const GAME_ORIGINS = new Set([`http://127.0.0.1:${GAME_PORT}`, `http://localhost:${GAME_PORT}`]);
+const probeWss = new WebSocketServer({ noServer: true });
+gameServer.on('upgrade', (req, socket, head) => {
+  const url = new URL(req.url, `http://${HOST}`);
+  const m = url.pathname.match(/^\/__probe\/([a-f0-9]+)$/);
+  if (!m || !findThread(m[1]) || !GAME_ORIGINS.has(req.headers.origin)) { socket.destroy(); return; }
+  probeWss.handleUpgrade(req, socket, head, (ws) => attachProbe(m[1], ws, Number(url.searchParams.get('load')) || Date.now()));
 });
 
 // Resolves once both servers listen; the desktop app awaits this before opening its window.

@@ -6,6 +6,9 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
+// Tests run with their own profile so they never touch the real app's window size or local storage.
+if (process.env.FORGE_PROFILE) app.setPath('userData', process.env.FORGE_PROFILE);
+
 // One Forge at a time: a second launch just focuses the existing window.
 if (!app.requestSingleInstanceLock()) app.quit();
 
@@ -15,7 +18,25 @@ const loadBounds = () => { try { return JSON.parse(fs.readFileSync(STATE_FILE(),
 
 async function start() {
   // Per-user data folder (threads, briefs, worktrees), e.g. %APPDATA%\Forge\data
-  process.env.FORGE_DATA = path.join(app.getPath('userData'), 'data');
+  process.env.FORGE_DATA ??= path.join(app.getPath('userData'), 'data'); // tests can point this elsewhere
+
+  // Hidden game preview: lets Claude check a game even when its Play tab is not open in the window.
+  // The server calls this; the page's probe then connects back like the visible preview does.
+  const hidden = new Map(); // url -> { win, timer }
+  globalThis.forgeEnsurePreview = (gameUrl, { fresh = false } = {}) => {
+    let h = hidden.get(gameUrl);
+    if (fresh && h && !h.win.isDestroyed()) h.win.webContents.reload();
+    if (!h || h.win.isDestroyed()) {
+      // Offscreen rendering keeps drawing frames even though the window is never shown.
+      const w = new BrowserWindow({ show: false, width: 1280, height: 800, webPreferences: { offscreen: true, backgroundThrottling: false, sandbox: true } });
+      w.webContents.setFrameRate(30);
+      w.loadURL(gameUrl);
+      h = { win: w, timer: null };
+      hidden.set(gameUrl, h);
+    }
+    clearTimeout(h.timer); // close it after 10 idle minutes
+    h.timer = setTimeout(() => { if (!h.win.isDestroyed()) h.win.destroy(); hidden.delete(gameUrl); }, 10 * 60_000);
+  };
   let url;
   try {
     ({ url } = await (await import('../server/index.mjs')).ready);
@@ -37,6 +58,7 @@ async function start() {
   });
   if (bounds.maximized) win.maximize();
   win.once('ready-to-show', () => win.show());
+  win.on('closed', () => app.quit()); // hidden preview windows must not keep the app alive
   win.on('close', () => fs.writeFileSync(STATE_FILE(), JSON.stringify({ ...win.getNormalBounds(), maximized: win.isMaximized() })));
 
   // Links that leave Forge (e.g. "Open in tab" for the game) open in the default browser.

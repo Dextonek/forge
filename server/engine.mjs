@@ -23,6 +23,17 @@ export function detectEngine(root) {
 // True when the game can be previewed by serving the folder statically.
 export const isWebEngine = (e) => ['threejs', 'phaser', 'pixi', 'web'].includes(e);
 
+// Projects change: a folder added while empty becomes a web game once Claude writes index.html.
+// Returns true when the stored engine changed.
+export function refreshEngine(project) {
+  let e;
+  try { e = detectEngine(project.path); } catch { return false; }
+  if (e === project.engine) return false;
+  project.engine = e;
+  project.web = isWebEngine(e);
+  return true;
+}
+
 // Kept deliberately short: every word here is paid on every turn (though it is cached).
 const HINTS = {
   threejs: 'three.js browser game, served as static files. Use setAnimationLoop, keep per-frame allocations out of the loop, dispose geometries/materials you replace.',

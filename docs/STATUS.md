@@ -4,8 +4,30 @@ Location: `C:\projectG\Forge` (git, branch `main`, no remote yet). After a fresh
 `npm ci`; if `node_modules\electron\dist\electron.exe` is missing, run `node node_modules/electron/install.js`.
 Builds go to `release\` (git-ignored); rebuild with `npm run dist`.
 
+## Phase 2 (branch `feat/phase-2-harness`) — done and tested with real Haiku turns
+- `verify_game`: reloads the thread's preview, waits for the new load, returns errors/warnings (deduplicated,
+  counted) and a JPEG of the main canvas (~280 tokens). Probe + error buffer are keyed by **thread**.
+  If the visible preview has no size or isn't drawing, the desktop app uses a hidden offscreen preview.
+  Test: `node scripts/verify-test.mjs` → screenshot showed the green cube Claude had just made.
+- Done-check (Stop hook): after editing a web game without verifying, Claude is sent back once to call
+  `verify_game`. Never after Stop, in Plan mode, for non-web projects, or when nothing was edited. Tested.
+- `game_eval`: runs JS in the live game (asks in Ask mode).
+- Price-aware sticky routing (`scripts/router-sticky-test.mjs`): switches down to Haiku freely, stays on Opus
+  instead of Opus→Sonnet once a thread has history.
+- Progress notes (`progress` tool, stored in `data/progress/<project>.md`, given with a thread's first message,
+  never in the system prompt or the game folder). Test: `node scripts/handoff-test.mjs`.
+- "Start a fresh thread from a summary" (options menu, or the "start fresh" link at >60k context): Haiku writes a
+  handoff note (≈$0.0005); the new thread started at 14k context and knew the open task.
+- Regression: `scripts/e2e.mjs` and `scripts/perm-test.mjs` pass.
+- Engine re-detection at turn start/end and when a thread opens (found on the user's RougeLikeSurvival project,
+  added while empty and stuck on "unknown"; tested on a copy of the real data → now "web").
+- New build run once against a copy of the user's real data: project, thread and usage load correctly.
+- Skipped on purpose: one live process per thread. Measured start-up ≈1 s per turn (`scripts/startup-timing.mjs`),
+  not worth the risk.
+- Testing uses `FORGE_PORT=4417`, `FORGE_DATA=.testdata`, `FORGE_PROFILE=.testprofile` (all git-ignored).
+
 ## Next step
-Phase 2 of docs/ROADMAP.md, starting with item 5: screenshot tool + completion guard.
+Commit Phase 2 on `feat/phase-2-harness` (waiting for the user's OK), then Phase 3 (pick-in-game first).
 
 ## Done and verified
 - Desktop app (Electron): `npm run app` and the packaged `release\win-unpacked\Forge.exe` start, show the native

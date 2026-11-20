@@ -2,3 +2,5 @@ data/
 node_modules/
 release/
 .claude/settings.local.json
+.testdata/
+.testprofile/

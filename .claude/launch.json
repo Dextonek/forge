@@ -1,1 +1,1 @@
-{"version":"0.0.1","configurations":[{"name":"forge","runtimeExecutable":"npm","runtimeArgs":["start"],"port":4317}]}
+{"version":"0.0.1","configurations":[{"name":"forge","runtimeExecutable":"npm","runtimeArgs":["start"],"port":4317},{"name":"forge-test","runtimeExecutable":"node","runtimeArgs":["server/index.mjs"],"port":4417,"env":{"FORGE_PORT":"4417","FORGE_DATA":"C:\\projectG\\Forge\\.testdata"}}]}

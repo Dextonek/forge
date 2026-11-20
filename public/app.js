@@ -220,7 +220,9 @@ function renderThreadUsage() {
   const t = thread();
   if (!t) return;
   const u = t.usage;
-  $('#ctxInfo').textContent = [t.lastContextTokens ? `${tok(t.lastContextTokens)} context` : '', u ? `${usd(u.costUsd)} · ${u.turns ?? 0} turns` : ''].filter(Boolean).join(' · ');
+  const big = (t.lastContextTokens ?? 0) > 60_000;
+  $('#ctxInfo').innerHTML = [t.lastContextTokens ? `<span class="${big ? 'warnTxt' : ''}">${tok(t.lastContextTokens)} context</span>` : '', u ? `${usd(u.costUsd)} · ${u.turns ?? 0} turns` : ''].filter(Boolean).join(' · ')
+    + (big ? ` · <a href="#" id="handoffLink" title="Every message re-reads this context. A fresh thread from a summary starts small.">start fresh</a>` : '');
   $('#ctxInfo').title = 'Context = tokens the model reads on every request in this thread. Lower is cheaper.';
   $('#threadUsage').innerHTML = u ? `<div>Thread ${usd(u.costUsd)} · saved vs all-Opus ≈ <span class="saved">${usd(Math.max(0, u.ifAllOpusUsd - u.costUsd))}</span></div>` +
     Object.entries(u.byModel ?? {}).map(([m, x]) => `<div>${esc(short(m))}: ${usd(x.cost)} · ${tok(x.in + x.cacheRead + x.cacheWrite)} in (${hitRate(x)}% cached) · ${tok(x.out)} out</div>`).join('') : 'No usage yet.';
@@ -273,6 +275,14 @@ function renderEvent(ev, replay = false) {
       return;
     }
     case 'info': { const a = ensureAct(); el.className = 'info'; el.textContent = ev.text; a.body.appendChild(el); return; }
+    case 'shot': {
+      // What Claude saw when it checked the game: shown inside the turn's activity group.
+      const a = ensureAct();
+      el.className = 'shot';
+      el.innerHTML = `<div class="dim small">${icon('play')} Checked the game · ${ev.errors ? `<span class="errTxt">${ev.errors} runtime error${ev.errors === 1 ? '' : 's'}</span>` : 'no runtime errors'}${ev.warnings ? ` · ${ev.warnings} warning${ev.warnings === 1 ? '' : 's'}` : ''}</div>${ev.image ? `<img src="${ev.image}" alt="Screenshot Claude took of the game">` : `<div class="dim small">No screenshot: ${esc(ev.note)}</div>`}`;
+      a.body.appendChild(el);
+      return;
+    }
     case 'tool': {
       const a = ensureAct(); a.n++;
       el.className = 'tool' + (ev.sub ? ' sub' : '');
@@ -292,6 +302,10 @@ function renderEvent(ev, replay = false) {
       if (ev.sub) { const a = ensureAct(); el.className = 'actText sub'; el.innerHTML = mdLite(ev.text); a.body.appendChild(el); return; }
       dropLive(); // the finished block replaces the streamed preview
       el.className = 'text'; el.innerHTML = mdLite(ev.text); break;
+    case 'handoff':
+      el.className = 'planCard';
+      el.innerHTML = `<div class="apLabel">↳ Continues “${esc(ev.from)}”</div><div class="text">${mdLite(ev.note)}</div><div class="dim small">Claude gets this note with your first message here (summary cost ${usd(ev.costUsd)}).</div>`;
+      break;
     case 'plan':
       el.className = 'planCard';
       el.innerHTML = `<div class="apLabel">${icon('map')} Plan</div><div class="text">${mdLite(ev.text)}</div>
@@ -414,6 +428,17 @@ $('#composer').addEventListener('submit', async (e) => {
 $('#stop').addEventListener('click', () => api(`/api/threads/${current}/interrupt`, { method: 'POST' }));
 $('#optsBtn').addEventListener('click', () => { renderThreadUsage(); toggleMenu('#optsMenu'); });
 
+async function handoff() {
+  const t = thread();
+  if (!t || t.running) return;
+  $('#optsMenu').hidden = true;
+  $('#ctxInfo').textContent = 'Writing a handoff summary…';
+  try { const nt = await api(`/api/threads/${t.id}/handoff`, { method: 'POST' }); S.threads.push(nt); await openThread(nt.id); $('#msg').focus(); }
+  catch (err) { alert(err.message); renderThreadUsage(); }
+}
+$('#handoffBtn').addEventListener('click', handoff);
+$('#ctxInfo').addEventListener('click', (e) => { if (e.target.id === 'handoffLink') { e.preventDefault(); handoff(); } });
+
 const patchThread = (body) => api(`/api/threads/${current}`, { method: 'PATCH', body });
 
 // ---------------- model + permission menus ----------------
@@ -520,10 +545,9 @@ function loadPlay() {
 }
 $('#reload').addEventListener('click', loadPlay);
 async function loadErrors() {
-  const p = projectOf(thread());
-  if (!p) return;
-  const errs = await api(`/api/projects/${p.id}/errors`);
-  $('#errors').innerHTML = errs.map((e) => `<li class="${e.kind === 'warn' ? 'warn' : ''}">[${esc(e.kind)}] ${esc(e.msg)}</li>`).join('') || '<li class="dim" style="color:var(--dim)">None since the last reload.</li>';
+  if (!current) return;
+  const errs = await api(`/api/threads/${current}/errors`);
+  $('#errors').innerHTML = errs.map((e) => `<li class="${e.kind === 'warn' ? 'warn' : ''}">[${esc(e.kind)}]${e.count > 1 ? ` ×${e.count}` : ''} ${esc(e.msg)}</li>`).join('') || '<li class="dim" style="color:var(--dim)">None since the last reload.</li>';
   $('#errCount').textContent = errs.length;
 }
 async function loadTab() {
@@ -594,7 +618,7 @@ async function loadUsage() {
     (r) => (r.exists ? `class="link" data-open="${r.id}"` : ''));
   $('#tRecent').innerHTML = table([
     { h: 'When', f: (r) => `${ago(r.t)}<div class="dim">${new Date(r.t).toLocaleString()}</div>` },
-    { h: 'Thread', f: (r) => `${esc(r.title)}<div class="dim">${esc(r.project)}${r.kind === 'brief' ? ' · brief' : ''}${r.error ? ' · stopped/failed' : ''}</div>` },
+    { h: 'Thread', f: (r) => `${esc(r.title)}<div class="dim">${esc(r.project)}${r.kind === 'brief' ? ' · brief' : r.kind === 'handoff' ? ' · handoff summary' : ''}${r.error ? ' · stopped/failed' : ''}</div>` },
     { h: 'Route', f: (r) => `<span class="${tierCls[r.tier] ?? ''}">${esc(r.tier)}</span>` },
     { h: 'Models', f: (r) => Object.keys(r.perModel).map(short).join(', ') || '—' },
     { h: 'Input', num: 1, f: (r) => tok(Object.values(r.perModel).reduce((s, d) => s + d.in + d.cacheRead + d.cacheWrite, 0)) },
@@ -651,9 +675,12 @@ function connect() {
       if (msg.thread.id === current) { renderCrumbs(); renderThreadUsage(); }
       renderSide();
     }
-    if (msg.type === 'state') reloadState();
+    if (msg.type === 'state') {
+      const wasWeb = projectOf(thread())?.web;
+      reloadState().then(() => { if (current && projectOf(thread())?.web !== wasWeb) { renderCrumbs(); loadPlay(); loadTab(); } });
+    }
     if (msg.type === 'reload' && $('#autoReload').checked && msg.dir === thread()?.cwd) loadPlay();
-    if (msg.type === 'gameError' && msg.projectId === thread()?.projectId) loadErrors();
+    if (msg.type === 'gameError' && msg.threadId === current) loadErrors();
   };
   ws.onclose = () => setTimeout(connect, 1500);
 }

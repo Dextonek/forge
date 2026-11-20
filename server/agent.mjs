@@ -2,10 +2,11 @@
 import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import fs from 'node:fs';
-import { appendEvent, save, newId, readBrief, briefPath, appendUsage } from './store.mjs';
+import path from 'node:path';
+import { appendEvent, save, newId, readBrief, briefPath, appendUsage, DATA_DIR } from './store.mjs';
 import { engineHint, BINARY_GLOBS } from './engine.mjs';
 import { TIERS, routeMessage } from './router.mjs';
-import { assetSummary, getErrors } from './game.mjs';
+import { assetSummary, getErrors, formatErrors, probeConnected, probeCommand, waitForLoad } from './game.mjs';
 import { opusRatio, tierOf } from './models.mjs';
 import { beginTurn, backupFile, turnFiles } from './checkpoints.mjs';
 
@@ -16,7 +17,8 @@ export const PERM_MODES = ['default', 'acceptEdits', 'auto', 'plan', 'bypassPerm
 // so the ~30 default tools would cost thousands of tokens per turn for nothing.
 const CORE_TOOLS = ['Task', 'Bash', 'Edit', 'Glob', 'Grep', 'Read', 'Write'];
 const WEB_TOOLS = ['WebSearch', 'WebFetch'];
-const READ_ONLY = ['Read', 'Glob', 'Grep', 'mcp__forge__list_assets', 'mcp__forge__game_errors'];
+// Auto-allowed. game_eval is deliberately NOT here: it runs code in the game, so Ask mode asks.
+const READ_ONLY = ['Read', 'Glob', 'Grep', 'mcp__forge__list_assets', 'mcp__forge__verify_game', 'mcp__forge__progress'];
 
 // Isolation from the user's own Claude setup. Measured: without this, every claude.ai connector
 // (Drive, Netlify, Docs, ...) is announced again in each turn's history, ~10-15k tokens per turn.
@@ -47,20 +49,75 @@ const HELPERS = {
   },
 };
 
-function forgeTools(project) {
-  return createSdkMcpServer({
-    name: 'forge',
-    tools: [
-      tool('list_assets', 'List the game\'s asset files (images, models, audio, scenes) grouped by kind with sizes. Use this instead of globbing for assets.', {},
-        async () => ({ content: [{ type: 'text', text: assetSummary(project.path) }] }), { annotations: { readOnlyHint: true } }),
-      tool('game_errors', 'Runtime errors/warnings reported by the running web game in the Forge Play tab since its last reload. Call after changing a web game to verify it runs.', {},
+const GAME_BASE = `http://127.0.0.1:${Number(process.env.FORGE_PORT ?? 4317) + 1}`;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const txt = (text) => ({ type: 'text', text });
+
+// Makes sure a page of this thread's game is connected: the visible Play tab, or (desktop app) a hidden preview.
+async function ensurePreview(thread) {
+  if (probeConnected(thread.id)) return true;
+  globalThis.forgeEnsurePreview?.(`${GAME_BASE}/play/${thread.id}/`);
+  await waitForLoad(thread.id, 0, 12_000);
+  return probeConnected(thread.id);
+}
+
+// Project progress notes live in Forge's data folder (never in the game folder, never in the system prompt).
+export const progressPath = (projectId) => path.join(DATA_DIR, 'progress', `${projectId}.md`);
+export const readProgress = (projectId) => { try { return fs.readFileSync(progressPath(projectId), 'utf8'); } catch { return ''; } };
+
+function forgeTools(project, thread, turn, emit) {
+  const tools = [
+    tool('list_assets', 'List the game\'s asset files (images, models, audio, scenes) grouped by kind with sizes. Use this instead of globbing for assets.', {},
+      async () => ({ content: [txt(assetSummary(project.path))] }), { annotations: { readOnlyHint: true } }),
+    tool('progress', 'Read or replace this project\'s progress notes (goals, features with done/todo, decisions, known bugs). Stored by Forge, not in the game folder. Keep them under ~60 lines.',
+      { action: z.enum(['read', 'write']), text: z.string().max(6000).optional().describe('Full new notes when action is write') },
+      async ({ action, text }) => {
+        if (action === 'read') return { content: [txt(readProgress(project.id) || '(no progress notes yet)')] };
+        if (!text?.trim()) return { content: [txt('Nothing written: pass the full notes in `text`.')], isError: true };
+        fs.mkdirSync(path.dirname(progressPath(project.id)), { recursive: true });
+        fs.writeFileSync(progressPath(project.id), text.trim() + '\n');
+        emit({ type: 'info', text: 'Progress notes updated' });
+        return { content: [txt('Progress notes saved.')] };
+      }),
+  ];
+  if (project.web) {
+    tools.push(
+      tool('verify_game', 'Reload the live game preview, wait for it, and return its runtime errors plus a screenshot of the main canvas. Call this after changing the game and before saying you are done. HTML menus/HUD outside the canvas are not in the screenshot.', {},
         async () => {
-          const errs = getErrors(project.id);
-          const text = errs.length ? errs.map((e) => `[${e.kind}] ${e.msg}`).join('\n') : 'No runtime errors reported (the game must be open in the Play tab for errors to be captured).';
-          return { content: [{ type: 'text', text }] };
+          turn.verifiedAt = Date.now();
+          if (!(await ensurePreview(thread))) return { content: [txt('NOT VERIFIED: no game preview is open for this thread. Tell the user to open the Play tab (or use the Forge desktop app) and check the game.')] };
+          const t0 = Date.now();
+          await probeCommand(thread.id, 'reload');
+          if (!(await waitForLoad(thread.id, t0, 12_000))) return { content: [txt('NOT VERIFIED: the preview did not reload within 12 s.')] };
+          await sleep(1500); // let the first frames run and errors arrive
+          let shot = await probeCommand(thread.id, 'shot');
+          if (['no canvas on the page', 'not drawing frames'].includes(shot.error) && globalThis.forgeEnsurePreview) {
+            // The visible preview may be collapsed (narrow window) or not drawing (minimized):
+            // use the hidden, always-rendering preview instead.
+            const t1 = Date.now();
+            globalThis.forgeEnsurePreview(`${GAME_BASE}/play/${thread.id}/`, { fresh: true });
+            if (await waitForLoad(thread.id, t1, 12_000)) { await sleep(1500); shot = await probeCommand(thread.id, 'shot'); }
+          }
+          if (shot.error === 'no canvas on the page') shot.error = 'no visible canvas (the game draws nothing, or the Play panel is collapsed because the window is narrow)';
+          if (shot.error === 'not drawing frames') shot.error = 'the preview is not drawing frames (window minimized or in the background)';
+          const errs = getErrors(thread.id);
+          const nErr = errs.filter((e) => e.kind !== 'warn').length, nWarn = errs.length - nErr;
+          emit({ type: 'shot', image: shot.image ?? null, errors: nErr, warnings: nWarn, note: shot.error ?? '' });
+          const content = [txt(errs.length ? `After reload: ${nErr} error(s), ${nWarn} warning(s):\n${formatErrors(errs)}` : 'No runtime errors or warnings after reload.')];
+          if (shot.image) content.push({ type: 'image', data: shot.image.split(',')[1], mimeType: 'image/jpeg' }, txt(`Screenshot of the main canvas, ${shot.w}x${shot.h} (canvas ${shot.canvas}).`));
+          else content.push(txt(`No screenshot: ${shot.error ?? 'unknown reason'}.`));
+          return { content };
         }, { annotations: { readOnlyHint: true } }),
-    ],
-  });
+      tool('game_eval', 'Run a JavaScript expression inside the live game page and return its JSON value (max 4000 chars). Use it to inspect state (object counts, positions, FPS, globals) instead of guessing. Do not use it to change the game permanently; edit the files for that.',
+        { code: z.string().max(4000) },
+        async ({ code }) => {
+          if (!(await ensurePreview(thread))) return { content: [txt('No game preview is open for this thread.')], isError: true };
+          const r = await probeCommand(thread.id, 'eval', { code });
+          return r.error ? { content: [txt(`Error: ${r.error}`)], isError: true } : { content: [txt(r.value)] };
+        }),
+    );
+  }
+  return createSdkMcpServer({ name: 'forge', tools });
 }
 
 function systemAppend(project) {
@@ -71,7 +128,9 @@ function systemAppend(project) {
     `- ${brief ? 'The project brief below replaces exploring: open only the files you need.' : 'There is no project brief yet; explore only as much as the task needs.'}`,
     '- Delegate searches across more than ~3 files to the `scout` agent, long-output commands to `runner`, and fully specified mechanical edits to `mechanic`. They run on a cheaper model and return summaries.',
     '- Never Read binary assets; use mcp__forge__list_assets.',
-    project.web ? '- After changing the game, call mcp__forge__game_errors to check for runtime errors.' : '',
+    project.web ? '- After changing the game, call mcp__forge__verify_game (reloads the preview, returns runtime errors and a screenshot) and fix what it shows before you finish. Use mcp__forge__game_eval to inspect live state instead of guessing.' : '',
+    '- Project progress notes are kept with mcp__forge__progress (not in the game folder). Read them at the start of a new task if they are not already in the conversation; after finishing a feature or making a decision, write the updated notes.',
+    '- If the project is nearly empty and has no progress notes, first write a short feature list with mcp__forge__progress, scaffold the game, then build the features one at a time.',
     '- Keep replies short: what changed, where, and anything the user must check.',
     brief ? `\n## Project brief\n${brief}` : '',
   ].filter(Boolean).join('\n');
@@ -130,7 +189,7 @@ function recordTurnUsage(thread, m, { tier, ctx, kind = 'turn' }) {
 
 export function isRunning(threadId) { const r = running.get(threadId); return !!r && !r.resultSeen; }
 
-export async function runTurn({ thread, project, text, override, broadcast }) {
+export async function runTurn({ thread, project, text, override, broadcast, onTurnEnd }) {
   const prev = running.get(thread.id);
   if (prev && !prev.resultSeen) throw new Error('thread is already running');
   if (prev) await Promise.race([prev.ended, new Promise((r) => setTimeout(r, 20_000))]); // let the old process exit
@@ -159,7 +218,13 @@ export async function runTurn({ thread, project, text, override, broadcast }) {
   // If the user undid earlier turns, tell Claude once, so it doesn't assume its old edits are still there.
   const note = thread.pendingNote;
   if (note) { delete thread.pendingNote; save(); }
-  const modelText = note ? `[Forge note: ${note}]\n\n${text}` : text;
+  // First message of a thread: hand over the project's progress notes in the message itself
+  // (not the system prompt, which would invalidate the cache whenever the notes change).
+  const progress = !thread.sessionId ? readProgress(project.id) : '';
+  const modelText = [note && `[Forge note: ${note}]`, progress && `[Forge: project progress notes]\n${progress}`, text].filter(Boolean).join('\n\n');
+
+  // Per-turn state for the done-check.
+  const turn = { editedAt: 0, verifiedAt: 0, interrupted: false, guarded: false };
 
   let finish;
   const done = new Promise((r) => { finish = r; });
@@ -201,7 +266,7 @@ export async function runTurn({ thread, project, text, override, broadcast }) {
       ...(permissionMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {}),
       canUseTool,
       agents: HELPERS,
-      mcpServers: { forge: forgeTools(project) },
+      mcpServers: { forge: forgeTools(project, thread, turn, emit) },
       ...(budgetLeft ? { maxBudgetUsd: budgetLeft } : {}),
       abortController,
       includePartialMessages: true, // stream text as it is written
@@ -212,14 +277,27 @@ export async function runTurn({ thread, project, text, override, broadcast }) {
           hooks: [async (hin) => {
             try { backupFile(thread.id, turnId, thread.cwd, hin.tool_input?.file_path ?? hin.tool_input?.notebook_path); }
             catch (e) { console.warn('checkpoint failed:', e.message); }
+            turn.editedAt = Date.now();
             return {};
+          }],
+        }],
+        // Done-check: after editing a browser game, Claude may only finish once it has checked the
+        // result with verify_game. Blocks at most once per turn, never after Stop, in Plan mode,
+        // for non-web projects, or when nothing was edited.
+        Stop: [{
+          hooks: [async (hin) => {
+            if (hin.stop_hook_active || turn.guarded || turn.interrupted || !project.web || permissionMode === 'plan') return {};
+            if (!turn.editedAt || turn.verifiedAt > turn.editedAt) return {};
+            turn.guarded = true;
+            emit({ type: 'info', text: 'Done-check: Claude changed the game without checking it, so it was asked to verify first.' });
+            return { decision: 'block', reason: 'You changed game files in this turn but did not check the result. Call mcp__forge__verify_game once now. If it reports errors or the screenshot looks wrong, fix that; then finish with a short summary.' };
           }],
         }],
       },
     },
   });
   let markEnded;
-  const entry = { q, finish, abortController, resultSeen: false, ended: new Promise((r) => { markEnded = r; }) };
+  const entry = { q, finish, abortController, turn, resultSeen: false, ended: new Promise((r) => { markEnded = r; }) };
   running.set(thread.id, entry);
   let gotResult = false;
   broadcast({ type: 'running', threadId: thread.id, running: true });
@@ -270,6 +348,7 @@ export async function runTurn({ thread, project, text, override, broadcast }) {
     for (const [id, p] of pending) if (p.entry === entry) { pending.delete(id); p.resolve({ behavior: 'deny', message: 'turn ended' }); }
     if (running.get(thread.id) === entry) running.delete(thread.id);
     markEnded();
+    try { onTurnEnd?.(); } catch { /* best effort */ }
     broadcast({ type: 'running', threadId: thread.id, running: isRunning(thread.id) });
   }
 }
@@ -297,10 +376,37 @@ export function answerApproval(reqId, decision, findThread) {
 export async function interrupt(threadId) {
   const r = running.get(threadId);
   if (!r) return false;
+  r.turn.interrupted = true; // the done-check never fights the Stop button
   await r.q.interrupt().catch(() => {});
   // If the SDK doesn't wrap up on its own, hard-stop so the thread can't stay "running" forever.
   setTimeout(() => { if (running.get(threadId) === r) { r.abortController.abort(); r.finish(); } }, 10_000);
   return true;
+}
+
+// "Fresh thread from summary": one cheap Haiku call turns a long thread's log into a handoff note,
+// so work can continue in a new thread with a small context instead of re-reading the whole history.
+export async function summarizeThread(project, oldThread, events) {
+  const lines = [];
+  for (const e of events) {
+    if (e.type === 'user') lines.push(`USER: ${e.text}`);
+    else if (e.type === 'text' && !e.sub) lines.push(`ASSISTANT: ${e.text}`);
+    else if (e.type === 'plan') lines.push(`PLAN: ${e.text}`);
+    else if (e.type === 'result' && e.changed?.length) lines.push(`(files changed: ${e.changed.join(', ')})`);
+    else if (e.type === 'undone') lines.push(`(user undid changes to: ${(e.files ?? []).join(', ')})`);
+  }
+  const log = lines.join('\n').slice(-24_000); // most recent part if very long
+  const q = query({
+    prompt: `Write a handoff note (at most 200 words) for a fresh coding agent continuing this game-dev conversation: the goal, what has been done (with file names), the current state, and the open issues or next steps. Output only the note.\n\n${log}`,
+    options: { cwd: project.path, model: 'haiku', effort: 'low', ...ISOLATION, maxTurns: 1, tools: [], permissionMode: 'dontAsk' },
+  });
+  for await (const m of q) {
+    if (m.type === 'result') {
+      if (m.is_error) throw new Error(m.result ?? m.subtype);
+      recordTurnUsage({ id: oldThread.id, projectId: project.id }, m, { tier: 'quick', ctx: 0, kind: 'handoff' });
+      return { note: m.result.trim(), costUsd: m.total_cost_usd };
+    }
+  }
+  throw new Error('no result');
 }
 
 // One cheap Haiku pass that writes a ~250-word project brief. Every later turn gets the brief

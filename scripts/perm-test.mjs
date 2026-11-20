@@ -3,7 +3,7 @@ import WebSocket from 'ws';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const B = 'http://127.0.0.1:4317';
+const B = `http://127.0.0.1:${process.env.FORGE_PORT ?? 4317}`;
 const H = { Origin: B, 'Content-Type': 'application/json' };
 const api = async (u, method = 'GET', body) => {
   const r = await fetch(B + u, { method, headers: H, body: body ? JSON.stringify(body) : undefined });

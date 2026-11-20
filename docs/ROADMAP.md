@@ -39,7 +39,7 @@ failure — not re-route every message.
 3. **Live streaming replies** (`includePartialMessages`): text appears as it's written. (T3, every competitor)
 4. **"Approve plan & run" button** on plan cards. (Claude Code plan mode, Unity AI Plan mode)
 
-### Phase 2 — a better harness (biggest quality gain)
+### Phase 2 — a better harness (biggest quality gain) — DONE except item 6's live process (measured ≈1 s start-up, skipped)
 5. **Screenshot tool + completion guard** — Forge's edge. The preview already runs inside Forge, so the probe
    can grab the canvas directly (no Playwright). Claude may only say "done" after the game reloaded,
    `game_errors` is empty and a screenshot was taken after the last edit. (Anthropic long-running-agent post:
