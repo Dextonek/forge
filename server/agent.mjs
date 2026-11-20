@@ -72,6 +72,29 @@ async function ensurePreview(thread) {
   return probeConnected(thread.id);
 }
 
+// Reload the thread's game preview, collect runtime errors and a screenshot, and show them in the chat.
+// Used by Claude's verify_game tool and by Forge's own check after turns of other agents.
+export async function checkGame(thread, emit) {
+  if (!(await ensurePreview(thread))) return { notVerified: 'NOT VERIFIED: no game preview is open for this thread. Tell the user to open the Play tab (or use the Forge desktop app) and check the game.' };
+  const t0 = Date.now();
+  await probeCommand(thread.id, 'reload');
+  if (!(await waitForLoad(thread.id, t0, 12_000))) return { notVerified: 'NOT VERIFIED: the preview did not reload within 12 s.' };
+  await sleep(1500); // let the first frames run and errors arrive
+  let shot = await probeCommand(thread.id, 'shot');
+  if (['no canvas on the page', 'not drawing frames'].includes(shot.error) && globalThis.forgeEnsurePreview) {
+    // The visible preview may be collapsed (narrow window) or not drawing (minimized): use the hidden one.
+    const t1 = Date.now();
+    globalThis.forgeEnsurePreview(`${GAME_BASE}/play/${thread.id}/?forge=hidden`, { fresh: true });
+    if (await waitForLoad(thread.id, t1, 12_000)) { await sleep(1500); shot = await probeCommand(thread.id, 'shot'); }
+  }
+  if (shot.error === 'no canvas on the page') shot.error = 'no visible canvas (the game draws nothing, or the Play panel is collapsed because the window is narrow)';
+  if (shot.error === 'not drawing frames') shot.error = 'the preview is not drawing frames (window minimized or in the background)';
+  const errs = getErrors(thread.id);
+  const nErr = errs.filter((e) => e.kind !== 'warn').length, nWarn = errs.length - nErr;
+  emit({ type: 'shot', src: shotUrl(thread.id, saveShot(thread.id, shot.image)), errors: nErr, warnings: nWarn, note: shot.error ?? '' });
+  return { errs, nErr, nWarn, shot };
+}
+
 // Project progress notes live in Forge's data folder (never in the game folder, never in the system prompt).
 export const progressPath = (projectId) => path.join(DATA_DIR, 'progress', `${projectId}.md`);
 export const readProgress = (projectId) => { try { return fs.readFileSync(progressPath(projectId), 'utf8'); } catch { return ''; } };
@@ -101,27 +124,11 @@ function forgeTools(project, thread, turn, emit) {
         async () => {
           turn.verifiedAt = Date.now();
           if (notWeb()) return NOT_WEB;
-          if (!(await ensurePreview(thread))) return { content: [txt('NOT VERIFIED: no game preview is open for this thread. Tell the user to open the Play tab (or use the Forge desktop app) and check the game.')] };
-          const t0 = Date.now();
-          await probeCommand(thread.id, 'reload');
-          if (!(await waitForLoad(thread.id, t0, 12_000))) return { content: [txt('NOT VERIFIED: the preview did not reload within 12 s.')] };
-          await sleep(1500); // let the first frames run and errors arrive
-          let shot = await probeCommand(thread.id, 'shot');
-          if (['no canvas on the page', 'not drawing frames'].includes(shot.error) && globalThis.forgeEnsurePreview) {
-            // The visible preview may be collapsed (narrow window) or not drawing (minimized):
-            // use the hidden, always-rendering preview instead.
-            const t1 = Date.now();
-            globalThis.forgeEnsurePreview(`${GAME_BASE}/play/${thread.id}/?forge=hidden`, { fresh: true });
-            if (await waitForLoad(thread.id, t1, 12_000)) { await sleep(1500); shot = await probeCommand(thread.id, 'shot'); }
-          }
-          if (shot.error === 'no canvas on the page') shot.error = 'no visible canvas (the game draws nothing, or the Play panel is collapsed because the window is narrow)';
-          if (shot.error === 'not drawing frames') shot.error = 'the preview is not drawing frames (window minimized or in the background)';
-          const errs = getErrors(thread.id);
-          const nErr = errs.filter((e) => e.kind !== 'warn').length, nWarn = errs.length - nErr;
-          emit({ type: 'shot', src: shotUrl(thread.id, saveShot(thread.id, shot.image)), errors: nErr, warnings: nWarn, note: shot.error ?? '' });
-          const content = [txt(errs.length ? `After reload: ${nErr} error(s), ${nWarn} warning(s):\n${formatErrors(errs)}` : 'No runtime errors or warnings after reload.')];
-          if (shot.image) content.push({ type: 'image', data: shot.image.split(',')[1], mimeType: 'image/jpeg' }, txt(`Screenshot of the main canvas, ${shot.w}x${shot.h} (canvas ${shot.canvas}).`));
-          else content.push(txt(`No screenshot: ${shot.error ?? 'unknown reason'}.`));
+          const r = await checkGame(thread, emit);
+          if (r.notVerified) return { content: [txt(r.notVerified)] };
+          const content = [txt(r.errs.length ? `After reload: ${r.nErr} error(s), ${r.nWarn} warning(s):\n${formatErrors(r.errs)}` : 'No runtime errors or warnings after reload.')];
+          if (r.shot.image) content.push({ type: 'image', data: r.shot.image.split(',')[1], mimeType: 'image/jpeg' }, txt(`Screenshot of the main canvas, ${r.shot.w}x${r.shot.h} (canvas ${r.shot.canvas}).`));
+          else content.push(txt(`No screenshot: ${r.shot.error ?? 'unknown reason'}.`));
           return { content };
         }, { annotations: { readOnlyHint: true } }),
       tool('playtest', 'Play the game with a short scripted input sequence in a hidden preview (the user\'s view is not touched) and report what happened. Steps run in order: {key:"Enter"} press a key (KeyboardEvent.code), {hold:"KeyD", ms:1000} hold a key, {click:[0.5,0.5]} click at a fraction of the canvas (x,y), {move:[x,y]} move the mouse, {wait:500} wait ms, {read:"G.p.x"} read a game value by plain path (top-level variables of classic scripts and their properties; not sure of the field names? read the object first, e.g. {read:"G.p"}, to get its JSON),{shot:"label"} screenshot (max 4). The page is reloaded first unless fresh is false. Base pass/fail on read values where state is reachable; when a verdict rests only on screenshots, say so. Record the verdict per feature in the progress notes.',

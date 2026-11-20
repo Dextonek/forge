@@ -32,6 +32,7 @@
     <symbol id="i-doc" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></symbol>
     <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M6 6l12 12M18 6 6 18"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0zM12 18v4"/></symbol>
     <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
     <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
     <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
@@ -63,6 +64,7 @@
   <div id="threads"></div>
   <div class="sideFoot">
     <button class="ib" id="usageBtn" title="Usage statistics"><svg class="i"><use href="#i-chart"/></svg></button>
+    <button class="ib" id="providersBtn" title="Agents: add OpenAI Codex, Google Gemini, open-source models…"><svg class="i"><use href="#i-plug"/></svg></button>
     <button id="todayBox" class="todayBox" title="Usage statistics"></button>
   </div>
 </aside>
@@ -131,6 +133,25 @@
     </div>
   </div>
 </aside>
+
+<section id="providersView" hidden>
+  <div class="uWrap">
+    <div class="uHead"><h1>Agents</h1><span class="grow"></span><button class="btn" id="refreshProviders">Refresh</button></div>
+    <p class="dim small">Claude is built in. Add other coding agents that use your own subscriptions; they connect through the open Agent Client Protocol (ACP). Each is installed into Forge's own folder and can be removed again.</p>
+    <div id="providerList" class="provList"></div>
+    <h2>Add your own agent</h2>
+    <p class="dim small">Any program that speaks ACP over stdio. Give the full path to the program and its arguments.</p>
+    <form id="customForm" class="custForm">
+      <input id="custName" placeholder="Name, e.g. My agent">
+      <input id="custCmd" placeholder="Full path, e.g. C:\tools\my-agent.exe">
+      <input id="custArgs" placeholder="Arguments, e.g. --acp">
+      <button class="btn">Add</button>
+    </form>
+    <h2>Local open-source models</h2>
+    <p class="dim small">OpenCode can use models running on this PC through Ollama (127.0.0.1:11434) or LM Studio (127.0.0.1:1234); it finds them automatically.
+      <span id="gpuNote"></span></p>
+  </div>
+</section>
 
 <section id="usageView" hidden>
   <div class="uWrap">

@@ -56,7 +56,7 @@ function statusOf(t) {
 }
 function threadRow(t) {
   const p = projectOf(t);
-  const l3 = t.worktree ? `${icon('branch')}forge/${esc(t.id)}` : `${icon('route')}${t.model && t.model !== 'auto' ? esc(modelName(t.model)) : t.lastTier ? 'Auto · ' + esc(TIERS[t.lastTier]?.label.replace(/^\w+ \((.+)\)$/, '$1') ?? t.lastTier) : 'Auto'}${t.usage ? ` · ${usd(t.usage.costUsd)} · ${t.usage.turns ?? 0} turns` : ''}`;
+  const l3 = t.worktree ? `${icon('branch')}forge/${esc(t.id)}` : isAcp(t) ? `${icon('plug')}${esc(providerName(t.provider))}${t.usage ? ` · ${t.usage.turns ?? 0} turns · subscription` : ''}` : `${icon('route')}${t.model && t.model !== 'auto' ? esc(modelName(t.model)) : t.lastTier ? 'Auto · ' + esc(TIERS[t.lastTier]?.label.replace(/^\w+ \((.+)\)$/, '$1') ?? t.lastTier) : 'Auto'}${t.usage ? ` · ${usd(t.usage.costUsd)} · ${t.usage.turns ?? 0} turns` : ''}`;
   return `<div class="thr ${t.id === current ? 'on' : ''}" data-thread="${t.id}">
     <div class="l1">${chip(p)}<span>${esc(p?.name)}</span>${statusOf(t)}</div>
     <div class="l2 tt">${esc(t.title)}</div>
@@ -170,21 +170,89 @@ function startRename(id) {
 $('#crumbThread').addEventListener('dblclick', () => current && startRename(current));
 
 // ---------------- views ----------------
+let view = 'threads';
 function renderCrumbs() {
-  const usage = !$('#usageView').hidden;
+  const page = { usage: 'Usage', providers: 'Agents' }[view];
   const t = thread(), p = projectOf(t);
-  $('#crumbProject').innerHTML = usage ? 'Usage' : p ? `${chip(p)}${esc(p.name)}` : '';
-  $('#crumbSep').hidden = usage || !t;
-  $('#crumbThread').textContent = usage ? '' : t?.title ?? '';
+  $('#crumbProject').innerHTML = page ?? (p ? `${chip(p)}${esc(p.name)}` : '');
+  $('#crumbSep').hidden = !!page || !t;
+  $('#crumbThread').textContent = page ? '' : t?.title ?? '';
 }
 function setView(v) {
-  document.body.classList.toggle('usageMode', v === 'usage');
+  view = v;
+  document.body.classList.toggle('usageMode', v !== 'threads'); // full-width page: hide chat + panel
   $('#usageView').hidden = v !== 'usage';
+  $('#providersView').hidden = v !== 'providers';
   $('#usageBtn').classList.toggle('on', v === 'usage');
+  $('#providersBtn').classList.toggle('on', v === 'providers');
   renderCrumbs();
   if (v === 'usage') loadUsage();
+  if (v === 'providers') loadProviders();
 }
-$('#usageBtn').addEventListener('click', () => setView($('#usageView').hidden ? 'usage' : 'threads'));
+$('#usageBtn').addEventListener('click', () => setView(view === 'usage' ? 'threads' : 'usage'));
+$('#providersBtn').addEventListener('click', () => setView(view === 'providers' ? 'threads' : 'providers'));
+
+// ---------------- agents (providers) ----------------
+let PROVIDERS = [];
+const ready = (p) => p.installed && p.test?.state === 'ready';
+async function loadProviders() {
+  PROVIDERS = await api('/api/providers').catch(() => []);
+  const stateOf = (p) => !p.installed ? ['off', 'Not installed']
+    : !p.test ? ['off', 'Installed · not tested yet']
+    : p.test.state === 'ready' ? ['ready', `Ready${p.test.agent ? ' · ' + p.test.agent : ''}`]
+    : p.test.state === 'needs-login' ? ['needs', 'Installed · needs login']
+    : ['err', `Error: ${p.test.error ?? 'unknown'}`];
+  $('#providerList').innerHTML = `<div class="prov"><h3>Claude <span class="pill">built in</span></h3><div class="acct">Your Claude login (Claude Code)</div>
+      <span class="pState ready">${icon('check')}Ready</span><div class="pnote">All of Forge's features: routing, helpers, Blender, verify, playtest, pick.</div></div>` +
+    PROVIDERS.map((p) => {
+      const [cls, label] = stateOf(p);
+      const methods = (p.test?.authMethods ?? []).filter((m) => m.type === 'agent');
+      return `<div class="prov" data-prov="${esc(p.id)}"><h3>${esc(p.name)}${p.version ? ` <span class="pill">${esc(p.version)}</span>` : ''}${p.custom ? ' <span class="pill">custom</span>' : ''}</h3>
+        <div class="acct">${esc(p.account)}</div>
+        <span class="pState ${cls}">${cls === 'ready' ? icon('check') : ''}${esc(label)}</span>
+        ${p.command ? `<div class="pnote"><code>${esc(p.command)}</code></div>` : ''}
+        ${p.note ? `<div class="pnote">${esc(p.note)}</div>` : ''}
+        <div class="pBtns">
+          ${!p.installed && !p.custom ? `<button class="btn small" data-pact="install">Install</button>` : ''}
+          ${p.installed ? `<button class="btn small" data-pact="test" title="Starts the agent and opens a session (no prompt, no cost)">Test</button>` : ''}
+          ${p.installed && p.test?.state !== 'ready' && p.loginHow !== 'none' ? (p.loginHow === 'acp' && methods.length
+            ? methods.map((m) => `<button class="btn small" data-pact="login" data-method="${esc(m.id)}">Log in: ${esc(m.name)}</button>`).join('')
+            : `<button class="btn small" data-pact="login">Log in…</button>`) : ''}
+          ${p.installed || p.custom ? `<button class="btn small" data-pact="remove">Remove</button>` : ''}
+        </div><div class="pLog" hidden></div></div>`;
+    }).join('');
+}
+$('#refreshProviders').addEventListener('click', loadProviders);
+$('#providerList').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-pact]');
+  if (!b) return;
+  const card = b.closest('[data-prov]'), id = card.dataset.prov, act = b.dataset.pact, log = card.querySelector('.pLog');
+  const p = PROVIDERS.find((x) => x.id === id);
+  if (act === 'remove' && !confirm(`Remove ${p.name} from Forge?${p.custom ? '' : ' Its files in Forge\'s folder are deleted; your login with that service stays.'}`)) return;
+  card.querySelectorAll('button').forEach((x) => (x.disabled = true));
+  log.hidden = false;
+  log.textContent = { install: 'Installing… (this can take a minute)', test: 'Starting the agent and opening a session…', login: 'Opening the sign-in…', remove: 'Removing…' }[act];
+  try {
+    if (act === 'install') { await api(`/api/providers/${id}/install`, { method: 'POST' }); await api(`/api/providers/${id}/test`, { method: 'POST' }); }
+    if (act === 'test') await api(`/api/providers/${id}/test`, { method: 'POST' });
+    if (act === 'login') {
+      const r = await api(`/api/providers/${id}/login`, { method: 'POST', body: { methodId: b.dataset.method } });
+      if (r.opened === 'console') { alert(`A console window opened for ${p.name}. Sign in there (your details stay with ${p.vendor}), close it when done, then press Test.`); }
+      else await api(`/api/providers/${id}/test`, { method: 'POST' });
+    }
+    if (act === 'remove') await api(`/api/providers/${id}`, { method: 'DELETE' });
+    await loadProviders();
+  } catch (err) { log.textContent = err.message; card.querySelectorAll('button').forEach((x) => (x.disabled = false)); }
+});
+$('#customForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    const p = await api('/api/providers', { method: 'POST', body: { name: $('#custName').value, command: $('#custCmd').value, args: $('#custArgs').value } });
+    ['#custName', '#custCmd', '#custArgs'].forEach((s) => ($(s).value = ''));
+    await api(`/api/providers/${p.id}/test`, { method: 'POST' }).catch(() => {});
+    loadProviders();
+  } catch (err) { alert(err.message); }
+});
 $('#todayBox').addEventListener('click', () => setView('usage'));
 
 // ---------------- thread view ----------------
@@ -375,6 +443,12 @@ function renderEvent(ev, replay = false) {
       el.className = 'turnMeta';
       el.innerHTML = `↺ Undid ${ev.turns?.length ?? 1} turn${ev.turns?.length === 1 ? '' : 's'} · restored ${ev.files?.length ? ev.files.map((f) => `<code>${esc(f)}</code>`).join(' ') : 'nothing'}. Claude will be told on your next message.`;
       break;
+    case 'checkErrors':
+      el.className = 'error';
+      el.innerHTML = `<b>Forge checked the game after this turn and found runtime errors:</b><pre style="white-space:pre-wrap;margin:6px 0">${esc(ev.text)}</pre>
+        <button class="btn small" data-senderr="1">Send these errors to ${esc(ev.agent)}</button>`;
+      el.dataset.errors = ev.text;
+      break;
     case 'models':
       el.className = 'changes';
       el.innerHTML = `${icon('image')}<span>${ev.files.length} 3D model${ev.files.length === 1 ? '' : 's'} written: ${ev.files.map((f) => `<code>${esc(f)}</code>`).join(' ')}</span>
@@ -401,6 +475,8 @@ function onDelta(text) {
 }
 
 $('#col').addEventListener('click', async (e) => {
+  const se = e.target.closest('[data-senderr]');
+  if (se) { const t = $('#msg'); t.value = `The game shows these runtime errors after your last change. Please fix them:\n${se.closest('[data-errors]').dataset.errors}`; updateRouteHint(); t.focus(); return; }
   const v3 = e.target.closest('[data-view3d]');
   if (v3) {
     setPanel(true);
@@ -495,7 +571,12 @@ $('#pickBtn').addEventListener('click', async () => {
   $('#pickBtn').classList.remove('on'); $('#pickBtn').querySelector('span').textContent = 'Pick';
 });
 $('#stop').addEventListener('click', () => api(`/api/threads/${current}/interrupt`, { method: 'POST' }));
-$('#optsBtn').addEventListener('click', () => { renderThreadUsage(); renderBlender(); toggleMenu('#optsMenu'); });
+$('#optsBtn').addEventListener('click', () => {
+  // Blender, web tools and the dollar budget only apply to Claude threads.
+  const claude = !isAcp(thread());
+  ['#optBlender', '#optWeb', '#optBudget'].forEach((s) => ($(s).closest('.mi').hidden = !claude));
+  renderThreadUsage(); if (claude) renderBlender(); toggleMenu('#optsMenu');
+});
 
 // ---------------- Blender ----------------
 async function renderBlender() {
@@ -566,9 +647,22 @@ document.addEventListener('click', (e) => {
   if (!e.target.closest('.menu') && !e.target.closest('#modelBtn,#permBtn,#optsBtn,#newThread')) ['#modelMenu', '#permMenu', '#optsMenu'].forEach((m) => ($(m).hidden = true));
 });
 
+const isAcp = (t) => t?.provider && t.provider !== 'claude';
+const providerName = (id) => PROVIDERS.find((p) => p.id === id)?.name ?? id;
+const started = (t) => !!(t?.usage?.turns || t?.sessionId || t?.acpSessionId);
+
 function renderPills() {
   const t = thread();
   if (!t) return;
+  if (isAcp(t)) {
+    // Another agent: it uses its own model; the permission pill shows the agent's own mode.
+    $('#modelBtn').innerHTML = `${icon('plug')}<span>${esc(providerName(t.provider))}</span>${icon('down')}`;
+    const mode = t.acpModes?.find((m) => m.id === (t.acpMode ?? t.wantMode));
+    $('#permBtn').innerHTML = `${icon('shield')}<span>${esc(mode?.name ?? 'Agent decides')}</span>${icon('down')}`;
+    $('#permBtn').classList.remove('warn');
+    $('#routeHint').textContent = '';
+    return;
+  }
   const model = t.model ?? 'auto', effort = t.effort ?? 'auto';
   $('#modelBtn').innerHTML = `${icon('spark').replace('class="i"', 'class="i spark"')}<span>${esc(modelName(model))}</span>${effort !== 'auto' ? `<span class="dim">${esc(effortName(effort))}</span>` : ''}${icon('down')}`;
   const perm = PERMS.find((p) => p.id === (t.permMode ?? (t.autoEdits ? 'acceptEdits' : 'default'))) ?? PERMS[0];
@@ -577,15 +671,29 @@ function renderPills() {
   updateRouteHint();
 }
 
+// Agent section at the top of the model menu: Claude plus every agent that passed its Test.
+function agentSection(t) {
+  const cur = t.provider ?? 'claude', lock = started(t);
+  const opts = [{ id: 'claude', name: 'Claude', desc: 'Built in · all Forge features' }, ...PROVIDERS.filter(ready).map((p) => ({ id: p.id, name: p.name, desc: p.account }))];
+  return `<div class="menuTitle">Agent</div>${opts.map((o) => `<button class="mi pick ${o.id === cur ? 'sel' : ''}" data-agent="${esc(o.id)}" ${lock && o.id !== cur ? 'disabled' : ''}>
+    <span class="tick">${o.id === cur ? icon('check') : ''}</span><span class="miText"><span>${esc(o.name)}</span><span class="dim">${esc(o.desc)}</span></span></button>`).join('')}
+    ${lock ? '<div class="agentNote">The agent is fixed once a thread has started. Start a new thread (or a fresh thread from a summary) to switch.</div>' : ''}
+    <button class="mi" data-manage="1">${icon('plug')}Manage agents…</button>`;
+}
+
 function renderModelMenu() {
   const t = thread();
+  if (isAcp(t)) {
+    $('#modelMenu').innerHTML = agentSection(t) + `<div class="agentNote">${esc(providerName(t.provider))} uses its own model and settings. Forge's routing, effort, helpers and Blender are Claude-only.</div>`;
+    return;
+  }
   const model = t.model ?? 'auto', effort = t.effort ?? 'auto';
   const row = (value, title, desc) => `<button class="mi pick ${value === model ? 'sel' : ''}" data-model="${esc(value)}">
     <span class="tick">${value === model ? icon('check') : ''}</span><span class="miText"><span>${esc(title)}</span><span class="dim">${esc(desc)}</span></span></button>`;
   const main = MAIN_MODELS.map(modelInfo).filter(Boolean);
   const more = MODELS.filter((m) => !MAIN_MODELS.includes(m.value));
   const levels = model === 'auto' ? EFFORTS : EFFORTS.filter(([v]) => v === 'auto' || (modelInfo(model)?.supportedEffortLevels ?? []).includes(v));
-  $('#modelMenu').innerHTML = `<div class="menuTitle">Model</div>
+  $('#modelMenu').innerHTML = agentSection(t) + `<div class="menuTitle">Model</div>
     ${row('auto', 'Auto', 'Haiku for tweaks, Sonnet for features, Opus for hard problems. Cheapest.')}
     ${main.map((m) => row(m.value, m.displayName, m.description)).join('')}
     ${more.length ? `<details class="more"><summary class="mi">${icon('chevron')}More models</summary>${more.map((m) => row(m.value, m.displayName, m.description)).join('')}</details>` : ''}
@@ -595,16 +703,33 @@ function renderModelMenu() {
 }
 function renderPermMenu() {
   const t = thread();
+  if (isAcp(t)) {
+    const modes = t.acpModes ?? [], cur = t.acpMode ?? t.wantMode;
+    $('#permMenu').innerHTML = `<div class="menuTitle">${esc(providerName(t.provider))} modes</div>` + (modes.length
+      ? modes.map((m) => `<button class="mi pick ${m.id === cur ? 'sel' : ''}" data-acpmode="${esc(m.id)}"><span class="tick">${m.id === cur ? icon('check') : ''}</span><span class="miText"><span>${esc(m.name)}</span><span class="dim">${esc(m.description)}</span></span></button>`).join('')
+      : `<div class="agentNote">${started(t) ? 'This agent has no selectable modes.' : 'The agent\'s modes appear after the first message.'} It asks you here whenever it needs approval.</div>`);
+    return;
+  }
   const cur = t.permMode ?? (t.autoEdits ? 'acceptEdits' : 'default');
   $('#permMenu').innerHTML = `<div class="menuTitle">Permissions</div>` + PERMS.map((p) => `<button class="mi pick ${p.id === cur ? 'sel' : ''} ${p.warn ? 'warnRow' : ''}" data-perm="${p.id}">
     <span class="tick">${p.id === cur ? icon('check') : ''}</span>${icon(p.icon)}<span class="miText"><span>${esc(p.title)}</span><span class="dim">${esc(p.desc)}</span></span></button>`).join('');
 }
 $('#modelBtn').addEventListener('click', async () => {
   if (!MODELS.length) MODELS = await api('/api/models').catch(() => []);
+  PROVIDERS = await api('/api/providers').catch(() => PROVIDERS);
   renderModelMenu(); toggleMenu('#modelMenu');
 });
 $('#permBtn').addEventListener('click', () => { renderPermMenu(); toggleMenu('#permMenu'); });
 $('#modelMenu').addEventListener('click', async (e) => {
+  if (e.target.closest('[data-manage]')) { $('#modelMenu').hidden = true; return setView('providers'); }
+  const ag = e.target.closest('[data-agent]');
+  if (ag && !ag.disabled) {
+    const t = thread();
+    try { await patchThread({ provider: ag.dataset.agent }); t.provider = ag.dataset.agent; rememberDefaults({ provider: t.provider }); }
+    catch (err) { alert(err.message); }
+    $('#modelMenu').hidden = true; renderPills(); renderSide();
+    return;
+  }
   const m = e.target.closest('[data-model]'), ef = e.target.closest('[data-effort]');
   if (!m && !ef) return;
   const t = thread();
@@ -617,6 +742,13 @@ $('#modelMenu').addEventListener('click', async (e) => {
   await patchThread(patch).catch((err) => alert(err.message));
 });
 $('#permMenu').addEventListener('click', async (e) => {
+  const am = e.target.closest('[data-acpmode]');
+  if (am) {
+    const t = thread();
+    $('#permMenu').hidden = true;
+    try { await patchThread({ acpMode: am.dataset.acpmode }); t.acpMode = am.dataset.acpmode; t.wantMode = am.dataset.acpmode; } catch (err) { alert(err.message); }
+    return renderPills();
+  }
   const p = e.target.closest('[data-perm]');
   if (!p) return;
   if (p.dataset.perm === 'bypassPermissions' && !confirm('Full access: Claude will edit files and run commands in this project without asking.\nUse it only on projects under version control or with a backup. Continue?')) return;
@@ -797,6 +929,7 @@ function connect() {
       if (msg.threadId === current) { renderEvent(msg.ev); scrollLog(); }
     }
     if (msg.type === 'delta' && msg.threadId === current) onDelta(msg.text);
+    if (msg.type === 'providerLog') { const l = document.querySelector(`[data-prov="${CSS.escape(msg.id)}"] .pLog`); if (l) { l.hidden = false; l.textContent += '\n' + msg.line; l.scrollTop = l.scrollHeight; } }
     if (msg.type === 'running') {
       const t = S.threads.find((x) => x.id === msg.threadId);
       if (t) t.running = msg.running;
@@ -820,6 +953,7 @@ function connect() {
 }
 
 MODELS = await api('/api/models').catch(() => []);
+PROVIDERS = await api('/api/providers').catch(() => []);
 await reloadState();
 closeThread();
 connect();

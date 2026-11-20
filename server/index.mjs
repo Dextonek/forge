@@ -15,6 +15,8 @@ import { repoRoot, createWorktree, diff, commit } from './git.mjs';
 import { serveGame, listAssets, pushError, getErrors, safeJoin, attachProbe, probeCommand } from './game.mjs';
 import { runTurn, answerApproval, interrupt, buildBrief, isRunning, awaitingCount, PERM_MODES, summarizeThread } from './agent.mjs';
 import { getModels } from './models.mjs';
+import { runAcpTurn, isAcpRunning, acpAwaiting, answerAcpApproval, interruptAcp, setAcpMode, closeAllAcp, closeAcpThread } from './acpturn.mjs';
+import { listProviders, getProvider, install as installProvider, uninstall as uninstallProvider, addCustom, testProvider, login as loginProvider } from './providers.mjs';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.FORGE_PORT ?? 4317);
@@ -65,7 +67,9 @@ function checkEngine(project) {
   }
   broadcast({ type: 'state' });
 }
-const publicThread = (t) => ({ ...t, running: isRunning(t.id), awaiting: awaitingCount(t.id) });
+// Claude turns and other agents' (ACP) turns.
+const busy = (id) => isRunning(id) || isAcpRunning(id);
+const publicThread = (t) => ({ ...t, running: busy(t.id), awaiting: awaitingCount(t.id) + acpAwaiting(t.id) });
 
 // --- routes ----------------------------------------------------------------------------------------
 async function api(req, res, parts) {
@@ -75,6 +79,27 @@ async function api(req, res, parts) {
   if (a === 'state' && m === 'GET') return json(res, 200, { projects: state.projects, threads: state.threads.map(publicThread), gamePort: GAME_PORT });
   if (a === 'usage' && m === 'GET') return json(res, 200, usageStats(state));
   if (a === 'models' && m === 'GET') return json(res, 200, await getModels(id === 'refresh'));
+  // ---- Providers (other agents over ACP) ----
+  if (a === 'providers' && !id && m === 'GET') return json(res, 200, listProviders());
+  if (a === 'providers' && !id && m === 'POST') {      // add your own ACP agent (full path to the program)
+    try { return json(res, 200, addCustom(await body(req))); } catch (e) { return json(res, 400, { error: e.message }); }
+  }
+  if (a === 'providers' && id && !b && m === 'DELETE') {
+    if (state.threads.some((t) => t.provider === id && busy(t.id))) return json(res, 409, { error: 'a thread is using this agent right now' });
+    for (const t of state.threads) if (t.provider === id) closeAcpThread(t.id);
+    try { uninstallProvider(id); return json(res, 200, { ok: true }); } catch (e) { return json(res, 400, { error: e.message }); }
+  }
+  if (a === 'providers' && id && b === 'install' && m === 'POST') {
+    try { return json(res, 200, await installProvider(id, (line) => broadcast({ type: 'providerLog', id, line }))); }
+    catch (e) { return json(res, 500, { error: e.message }); }
+  }
+  if (a === 'providers' && id && b === 'test' && m === 'POST') {
+    try { return json(res, 200, await testProvider(id)); } catch (e) { return json(res, 500, { error: e.message }); }
+  }
+  if (a === 'providers' && id && b === 'login' && m === 'POST') {
+    const { methodId } = await body(req);
+    try { return json(res, 200, await loginProvider(id, methodId)); } catch (e) { return json(res, 500, { error: e.message }); }
+  }
   if (a === 'blender' && m === 'GET') {             // is Blender reachable, and which thread is using it
     const s = await blenderStatus();
     return json(res, 200, { ...s, holder: blenderHolder() });
@@ -102,7 +127,7 @@ async function api(req, res, parts) {
     const project = findProject(id);
     if (!project) return json(res, 404, { error: 'no project' });
     if (!b && m === 'DELETE') {          // forget the project in Forge; files on disk are not touched
-      if (state.threads.some((t) => t.projectId === id && isRunning(t.id))) return json(res, 409, { error: 'a thread of this project is running' });
+      if (state.threads.some((t) => t.projectId === id && busy(t.id))) return json(res, 409, { error: 'a thread of this project is running' });
       for (const t of state.threads.filter((x) => x.projectId === id)) { deleteThreadLog(t.id); deleteCheckpoints(t.id); deleteShots(t.id); }
       state.threads = state.threads.filter((t) => t.projectId !== id);
       state.projects = state.projects.filter((p) => p.id !== id);
@@ -124,9 +149,10 @@ async function api(req, res, parts) {
   }
 
   if (a === 'threads' && !id && m === 'POST') {
-    const { projectId, title, worktree, model, effort, permMode } = await body(req);
+    const { projectId, title, worktree, model, effort, permMode, provider } = await body(req);
     const project = findProject(projectId);
     if (!project) return json(res, 400, { error: 'no project' });
+    if (provider && provider !== 'claude' && !getProvider(provider)) return json(res, 400, { error: 'unknown agent' });
     const tid = newId();
     let cwd = project.path;
     if (worktree) {
@@ -137,7 +163,8 @@ async function api(req, res, parts) {
     const thread = { id: tid, projectId, title: title || 'New thread', cwd, worktree: !!worktree, created: Date.now(), web: false, budgetUsd: null,
       // New threads start with the model/effort/permissions the user last picked (sent by the UI).
       model: typeof model === 'string' ? model : 'auto', effort: typeof effort === 'string' ? effort : 'auto',
-      permMode: PERM_MODES.includes(permMode) ? permMode : 'default' };
+      permMode: PERM_MODES.includes(permMode) ? permMode : 'default',
+      provider: provider && provider !== 'claude' ? provider : 'claude' };
     state.threads.push(thread); save();
     return json(res, 200, publicThread(thread));
   }
@@ -149,6 +176,15 @@ async function api(req, res, parts) {
     if (!b && m === 'PATCH') {
       const patch = await body(req);
       for (const k of ['title', 'web', 'budgetUsd', 'model', 'effort']) if (k in patch) thread[k] = patch[k];
+      if ('provider' in patch && patch.provider !== (thread.provider ?? 'claude')) {
+        // The agent is fixed once a thread has started: switching would drop its context. Use a fresh thread.
+        if (thread.usage?.turns || thread.sessionId || thread.acpSessionId) return json(res, 409, { error: 'This thread has already started with another agent. Start a new thread (or a fresh thread from a summary) to switch agents.' });
+        if (patch.provider !== 'claude' && !getProvider(patch.provider)) return json(res, 400, { error: 'unknown agent' });
+        thread.provider = patch.provider;
+      }
+      if ('acpMode' in patch) {
+        try { await setAcpMode(thread, String(patch.acpMode)); } catch (e) { return json(res, 400, { error: e.message }); }
+      }
       if ('permMode' in patch) {
         if (!PERM_MODES.includes(patch.permMode)) return json(res, 400, { error: 'unknown permission mode' });
         thread.permMode = patch.permMode; delete thread.autoEdits;
@@ -157,8 +193,8 @@ async function api(req, res, parts) {
       return json(res, 200, publicThread(thread));
     }
     if (!b && m === 'DELETE') {          // removes the thread and its chat log; a worktree folder is left on disk
-      if (isRunning(id)) return json(res, 409, { error: 'thread is running' });
-      deleteThreadLog(id); deleteCheckpoints(id); deleteShots(id);
+      if (busy(id)) return json(res, 409, { error: 'thread is running' });
+      deleteThreadLog(id); deleteCheckpoints(id); deleteShots(id); closeAcpThread(id);
       state.threads = state.threads.filter((t) => t.id !== id);
       save(); broadcast({ type: 'state' });
       return json(res, 200, { ok: true, worktreeLeft: thread.worktree ? thread.cwd : null });
@@ -188,21 +224,23 @@ async function api(req, res, parts) {
     if (b === 'message' && m === 'POST') {
       const { text, tier, attachments } = await body(req);
       if (!text?.trim()) return json(res, 400, { error: 'empty message' });
-      if (isRunning(id)) return json(res, 409, { error: 'thread is busy' });
+      if (busy(id)) return json(res, 409, { error: 'thread is busy' });
       if (thread.title === 'New thread') { thread.title = text.trim().slice(0, 48); save(); broadcast({ type: 'thread', thread: publicThread(thread) }); }
       checkEngine(project);
-      runTurn({ thread, project, text: text.trim(), attachments: Array.isArray(attachments) ? attachments.slice(0, 4) : [], override: tier ?? 'auto', broadcast, onTurnEnd: () => checkEngine(project) })
+      const run = thread.provider && thread.provider !== 'claude' ? runAcpTurn : runTurn;
+      run({ thread, project, text: text.trim(), attachments: Array.isArray(attachments) ? attachments.slice(0, 4) : [], override: tier ?? 'auto', broadcast, onTurnEnd: () => checkEngine(project) })
         .catch((e) => broadcast({ type: 'event', threadId: id, ev: { type: 'error', text: e.message } }))
         .finally(() => broadcast({ type: 'thread', thread: publicThread(thread) }));
       return json(res, 202, { ok: true });
     }
-    if (b === 'interrupt' && m === 'POST') return json(res, 200, { ok: await interrupt(id) });
+    if (b === 'interrupt' && m === 'POST') return json(res, 200, { ok: isAcpRunning(id) ? await interruptAcp(id) : await interrupt(id) });
     if (b === 'handoff' && m === 'POST') {        // new thread that starts from a summary of this one
-      if (isRunning(id)) return json(res, 409, { error: 'wait until the thread is idle' });
+      if (busy(id)) return json(res, 409, { error: 'wait until the thread is idle' });
       try {
         const { note, costUsd } = await summarizeThread(project, thread, readEvents(id));
         const nt = { id: newId(), projectId: thread.projectId, title: `↳ ${thread.title}`.slice(0, 60), cwd: thread.cwd, worktree: thread.worktree,
           created: Date.now(), web: thread.web, budgetUsd: thread.budgetUsd, model: thread.model, effort: thread.effort, permMode: thread.permMode,
+          provider: thread.provider ?? 'claude', wantMode: thread.acpMode ?? thread.wantMode,
           pendingNote: `This thread continues an earlier one ("${thread.title}"). Handoff note:\n${note}` };
         state.threads.push(nt); save();
         const ev = { type: 'handoff', from: thread.title, note, costUsd, t: Date.now() };
@@ -216,7 +254,7 @@ async function api(req, res, parts) {
       return json(res, 200, { files, repo: !!project.repo });
     }
     if (b === 'reject' && m === 'POST') {          // put one file back as it was before this thread
-      if (isRunning(id)) return json(res, 409, { error: 'wait until the thread is idle' });
+      if (busy(id)) return json(res, 409, { error: 'wait until the thread is idle' });
       const { file } = await body(req);
       try {
         rejectFile(id, String(file ?? ''));
@@ -228,7 +266,7 @@ async function api(req, res, parts) {
       } catch (e) { return json(res, 400, { error: e.message }); }
     }
     if (b === 'undo' && m === 'POST') {           // restore files to how they were before a turn
-      if (isRunning(id)) return json(res, 409, { error: 'wait until the thread is idle' });
+      if (busy(id)) return json(res, 409, { error: 'wait until the thread is idle' });
       const { turnId } = await body(req);
       try {
         const r = undoFrom(id, String(turnId ?? ''));
@@ -251,7 +289,7 @@ async function api(req, res, parts) {
 
   if (a === 'approvals' && id && m === 'POST') {
     const { decision } = await body(req);
-    const threadId = answerApproval(id, decision, findThread);
+    const threadId = answerApproval(id, decision, findThread) ?? answerAcpApproval(id, decision);
     if (threadId) broadcast({ type: 'event', threadId, ev: { type: 'approval_done', reqId: id, decision } });
     return json(res, threadId ? 200 : 404, { ok: !!threadId });
   }
@@ -339,6 +377,11 @@ gameServer.on('upgrade', (req, socket, head) => {
   const role = url.searchParams.get('role') === 'hidden' ? 'hidden' : 'visible';
   probeWss.handleUpgrade(req, socket, head, (ws) => attachProbe(m[1], ws, Number(url.searchParams.get('load')) || Date.now(), role));
 });
+
+// Stop all agent processes when Forge stops (the desktop app calls this on quit too).
+globalThis.forgeShutdown = closeAllAcp;
+process.on('exit', closeAllAcp);
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { closeAllAcp(); setTimeout(() => process.exit(0), 300); });
 
 // Resolves once both servers listen; the desktop app awaits this before opening its window.
 const listen = (s, port) => new Promise((resolve, reject) => { s.once('error', reject); s.listen(port, HOST, resolve); });

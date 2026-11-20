@@ -36,6 +36,51 @@ export function backupFile(threadId, turnId, cwd, filePath) {
   writeManifest(threadId, m);
 }
 
+// For agents that edit files themselves (not through Forge): record a file's content from before the turn.
+export function recordOriginal(threadId, turnId, cwd, absPath, before /* Buffer | null if it did not exist */) {
+  if (!inside(cwd, absPath)) return;
+  const m = readManifest(threadId, turnId);
+  if (m.files.some((f) => f.path === absPath)) return; // already backed up (e.g. written through Forge)
+  const entry = { path: absPath, rel: path.relative(cwd, absPath).split(path.sep).join('/'), existed: before != null };
+  if (entry.existed) { entry.backup = `${m.files.length}.bak`; fs.writeFileSync(path.join(root(threadId), turnId, entry.backup), before); }
+  m.files.push(entry);
+  writeManifest(threadId, m);
+}
+
+// Snapshot of a project's text files before a turn (for agents that edit on their own). Returns null when
+// the project is too big to snapshot (then Undo is not offered for that turn, rather than half-restoring).
+const TEXT = /\.(html?|css|m?js|cjs|ts|tsx|jsx|json|md|txt|glsl|wgsl|frag|vert|gd|tscn|tres|cs|py|lua|yaml|yml|toml|xml|svg|csv|ini|cfg)$/i;
+const SKIP = new Set(['.git', 'node_modules', '.godot', '.import', 'Library', 'Temp', 'Obj', 'Build', 'Builds', 'dist', '.forge']);
+export function snapshotProject(cwd, { maxFile = 1_000_000, maxTotal = 25_000_000 } = {}) {
+  const snap = new Map(); let total = 0;
+  const walk = (dir) => {
+    let ents = []; try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return true; }
+    for (const e of ents) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) { if (!SKIP.has(e.name) && !walk(p)) return false; continue; }
+      if (!TEXT.test(e.name)) continue;
+      let st; try { st = fs.statSync(p); } catch { continue; }
+      if (st.size > maxFile) continue;
+      total += st.size; if (total > maxTotal) return false;
+      snap.set(p, { mtime: st.mtimeMs, size: st.size, content: fs.readFileSync(p) });
+    }
+    return true;
+  };
+  return walk(cwd) ? snap : null;
+}
+// Files that changed, appeared or disappeared since the snapshot: [{ path, before: Buffer|null }].
+export function snapshotChanges(snap, cwd) {
+  const now = snapshotProject(cwd, { maxTotal: Infinity });
+  const out = [];
+  for (const [p, s] of snap) {
+    const n = now?.get(p);
+    if (!n) out.push({ path: p, before: s.content });                       // deleted
+    else if (n.size !== s.size || n.mtime !== s.mtime) { if (!n.content.equals(s.content)) out.push({ path: p, before: s.content }); }
+  }
+  for (const [p] of now ?? []) if (!snap.has(p)) out.push({ path: p, before: null }); // new file
+  return out;
+}
+
 export function turnFiles(threadId, turnId) {
   try { return readManifest(threadId, turnId).files.map((f) => f.rel); } catch { return []; }
 }

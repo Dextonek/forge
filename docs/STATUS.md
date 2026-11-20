@@ -71,6 +71,25 @@ Phase 2 is merged into `main`.
   skeleton. Turns that write models show a "View … in 3D" card in the chat.
 - Tested on copies of HorseWar models: horse_lod0.glb (7,000 triangles), horse_anim.glb (28 bones, Gallop/Stand/Down).
 
+## Other agents over ACP (branch `feat/providers-acp`)
+- Agents page (sidebar plug icon): Claude built in; OpenAI Codex (`@agentclientprotocol/codex-acp`), Google Gemini
+  (`@google/gemini-cli --acp`), OpenCode (`opencode-ai`, `opencode acp`, open-source/local models), and custom ACP
+  agents (full path + args). Install = `npm install --prefix <data>/providers/<id>` from a fixed list; the JS entry
+  point runs with Node (Forge.exe with ELECTRON_RUN_AS_NODE in the app), never through a shell. Test = initialize +
+  session/new (no prompt). "Ready" only after that works. Log in: buttons for the agent's own sign-in methods.
+- Threads pick an agent in the model menu (fixed once a thread started). One agent process + session per thread,
+  idle-closed after 15 min, all closed on quit (verified: no process left). session/load used when offered.
+- Parity: streamed text, steps, plan, approval cards with the agent's options, Stop (cancel → kill after 10 s),
+  agent modes in the permission menu, Undo (writes through Forge + pre-turn snapshot of text files ≤25 MB),
+  Forge's own game check after a turn that changed files (+ "Send these errors to <agent>"), brief/progress in the
+  first message, picks with images. Claude-only: routing, effort, helpers, Blender, web tools, $ budget.
+  Usage recorded per turn as "<agent> (subscription)", cost 0.
+- Tests: `scripts/acp-fake-test.mjs` (16/16 with the fake agent), `scripts/providers-proof.mjs` (handshakes:
+  Codex 2.8.0 needs login, Gemini CLI 0.70.0 needs login, OpenCode 1.19.6 ready), `scripts/acp-real-test.mjs`
+  (OpenCode real turns: colour change 31 s; speed change 14 s + Forge check screenshot, 0 errors).
+- Not tested: Codex and Gemini turns (need the user's logins). Which model OpenCode used by default is not shown.
+- Hardware: Intel UHD 630, 32 GB RAM, no dedicated GPU → local models not recommended on this PC.
+
 ## GitHub
 - Remote `origin` = https://Dextonek@github.com/Dextonek/forge.git (PUBLIC). Pushes go as **Dextonek** through a
   repo-local credential helper that asks `gh auth token --user Dextonek` at push time (no token stored). The global

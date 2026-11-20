@@ -83,4 +83,5 @@ ipcMain.handle('forge:openPath', (_e, p) => (typeof p === 'string' && fs.existsS
 
 app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });
 app.whenReady().then(start);
+app.on('will-quit', () => { try { globalThis.forgeShutdown?.(); } catch { /* best effort */ } }); // stop agent processes
 app.on('window-all-closed', () => app.quit());

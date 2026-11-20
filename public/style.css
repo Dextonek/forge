@@ -270,9 +270,23 @@ body.desktop .winCtl { width: 138px; flex: none; } /* room for the Windows capti
 .diff, .brief { white-space: pre-wrap; font: 12px/1.5 ui-monospace, Consolas, monospace; margin: 0; color: var(--muted); }
 .diff .add { color: var(--add); } .diff .del { color: var(--del); }
 
-/* ---------------- usage page ---------------- */
+/* ---------------- usage + agents pages ---------------- */
 body.usageMode #main, body.usageMode #panel { display: none; }
-#usageView { grid-column: 2 / 4; grid-row: 2; overflow: auto; min-height: 0; }
+#usageView, #providersView { grid-column: 2 / 4; grid-row: 2; overflow: auto; min-height: 0; }
+#providersView h2 { font-size: 13px; font-weight: 600; margin: 26px 0 8px; color: var(--muted); }
+.provList { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; margin-top: 14px; }
+.prov { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; }
+.prov h3 { margin: 0; font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.prov .acct { font-size: 12.5px; color: var(--muted); }
+.prov .pnote { font-size: 12px; color: var(--dim); }
+.pState { font-size: 12px; display: inline-flex; align-items: center; gap: 5px; }
+.pState.ready { color: var(--ok); } .pState.needs { color: var(--warn); } .pState.err { color: var(--bad); } .pState.off { color: var(--dim); }
+.pBtns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.pLog { font: 11.5px ui-monospace, Consolas, monospace; color: var(--dim); max-height: 90px; overflow: auto; white-space: pre-wrap; background: var(--bg); border-radius: 6px; padding: 4px 6px; }
+.custForm { display: grid; grid-template-columns: 1fr 2fr 1fr auto; gap: 8px; }
+@media (max-width: 720px) { .custForm { grid-template-columns: 1fr; } }
+.agentNote { font-size: 12px; color: var(--dim); padding: 4px 9px 8px; }
+.mi.pick[disabled] { opacity: .45; cursor: default; }
 .uWrap { max-width: 1100px; margin: 0 auto; padding: 8px 28px 48px; }
 .uHead { display: flex; align-items: center; } .uHead h1 { font-size: 22px; margin: 0; font-weight: 600; }
 #usageView h2 { font-size: 13px; font-weight: 600; margin: 26px 0 10px; color: var(--muted); }
