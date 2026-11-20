@@ -83,11 +83,16 @@ function forgeTools(project, thread, turn, emit) {
         return { content: [txt('Progress notes saved.')] };
       }),
   ];
-  if (project.web) {
+  // Game tools are also offered for "unknown" projects: an empty folder becomes a browser game during the
+  // turn that writes index.html, and should be checked in that same turn.
+  const notWeb = () => (turn.checkProject?.(), !project.web);
+  const NOT_WEB = { content: [txt('This project is not (yet) a browser game: there is no index.html with a game to preview.')] };
+  if (project.web || project.engine === 'unknown') {
     tools.push(
       tool('verify_game', 'Reload the live game preview, wait for it, and return its runtime errors plus a screenshot of the main canvas. Call this after changing the game and before saying you are done. HTML menus/HUD outside the canvas are not in the screenshot.', {},
         async () => {
           turn.verifiedAt = Date.now();
+          if (notWeb()) return NOT_WEB;
           if (!(await ensurePreview(thread))) return { content: [txt('NOT VERIFIED: no game preview is open for this thread. Tell the user to open the Play tab (or use the Forge desktop app) and check the game.')] };
           const t0 = Date.now();
           await probeCommand(thread.id, 'reload');
@@ -111,7 +116,7 @@ function forgeTools(project, thread, turn, emit) {
           else content.push(txt(`No screenshot: ${shot.error ?? 'unknown reason'}.`));
           return { content };
         }, { annotations: { readOnlyHint: true } }),
-      tool('playtest', 'Play the game with a short scripted input sequence in a hidden preview (the user\'s view is not touched) and report what happened. Steps run in order: {key:"Enter"} press a key (KeyboardEvent.code), {hold:"KeyD", ms:1000} hold a key, {click:[0.5,0.5]} click at a fraction of the canvas (x,y), {move:[x,y]} move the mouse, {wait:500} wait ms, {read:"G.p.x"} read a game value by plain path (top-level variables of classic scripts and their properties), {shot:"label"} screenshot (max 4). The page is reloaded first unless fresh is false. Base pass/fail on read values where state is reachable; when a verdict rests only on screenshots, say so. Record the verdict per feature in the progress notes.',
+      tool('playtest', 'Play the game with a short scripted input sequence in a hidden preview (the user\'s view is not touched) and report what happened. Steps run in order: {key:"Enter"} press a key (KeyboardEvent.code), {hold:"KeyD", ms:1000} hold a key, {click:[0.5,0.5]} click at a fraction of the canvas (x,y), {move:[x,y]} move the mouse, {wait:500} wait ms, {read:"G.p.x"} read a game value by plain path (top-level variables of classic scripts and their properties; not sure of the field names? read the object first, e.g. {read:"G.p"}, to get its JSON),{shot:"label"} screenshot (max 4). The page is reloaded first unless fresh is false. Base pass/fail on read values where state is reachable; when a verdict rests only on screenshots, say so. Record the verdict per feature in the progress notes.',
         {
           steps: z.array(z.object({
             key: z.string().max(40).optional(), hold: z.string().max(40).optional(), ms: z.number().min(0).max(5000).optional(),
@@ -122,6 +127,7 @@ function forgeTools(project, thread, turn, emit) {
         },
         async ({ steps, fresh = true }) => {
           turn.verifiedAt = Date.now(); // a playtest also counts as checking the game
+          if (notWeb()) return NOT_WEB;
           if (!globalThis.forgeEnsurePreview) return { content: [txt('Playtest needs the Forge desktop app (it runs in a hidden preview). Use verify_game and game_eval instead.')] };
           const t0 = Date.now();
           if (fresh || !probeConnectedAs(thread.id, 'hidden')) {
@@ -162,6 +168,7 @@ function forgeTools(project, thread, turn, emit) {
       tool('game_eval','Run a JavaScript expression inside the live game page and return its JSON value (max 4000 chars). Use it to inspect state (object counts, positions, FPS, globals) instead of guessing. Do not use it to change the game permanently; edit the files for that.',
         { code: z.string().max(4000) },
         async ({ code }) => {
+          if (notWeb()) return NOT_WEB;
           if (!(await ensurePreview(thread))) return { content: [txt('No game preview is open for this thread.')], isError: true };
           const r = await probeCommand(thread.id, 'eval', { code });
           return r.error ? { content: [txt(`Error: ${r.error}`)], isError: true } : { content: [txt(r.value)] };
@@ -240,6 +247,14 @@ function recordTurnUsage(thread, m, { tier, ctx, kind = 'turn' }) {
 
 export function isRunning(threadId) { const r = running.get(threadId); return !!r && !r.resultSeen; }
 
+// At most two small files (e.g. a README) and no folders other than dot-folders.
+function isNearlyEmpty(dir) {
+  try {
+    const ents = fs.readdirSync(dir, { withFileTypes: true }).filter((e) => !e.name.startsWith('.'));
+    return ents.every((e) => e.isFile()) && ents.length <= 2 && ents.every((e) => fs.statSync(path.join(dir, e.name)).size < 4000);
+  } catch { return false; }
+}
+
 // For edit approvals: the change as a diff, so the user reviews code, not JSON.
 function approvalDiff(toolName, input, cwd) {
   try {
@@ -299,13 +314,17 @@ export async function runTurn({ thread, project, text, attachments = [], overrid
   // First message of a thread: hand over the project's progress notes in the message itself
   // (not the system prompt, which would invalidate the cache whenever the notes change).
   const progress = !thread.sessionId ? readProgress(project.id) : '';
-  const modelText = [note && `[Forge note: ${note}]`, progress && `[Forge: project progress notes]\n${progress}`, ...picks.map(pickText), text].filter(Boolean).join('\n\n');
+  // New game in an (almost) empty folder: ask for a feature list first, in the message (system-prompt
+  // hints were ignored in testing).
+  const fresh = !readProgress(project.id) && isNearlyEmpty(project.path)
+    ? '[Forge: this project folder is (nearly) empty. First write a short goal and feature list with mcp__forge__progress (action "write"), then build the game, then check it with mcp__forge__verify_game.]' : '';
+  const modelText = [note && `[Forge note: ${note}]`, progress && `[Forge: project progress notes]\n${progress}`, fresh, ...picks.map(pickText), text].filter(Boolean).join('\n\n');
   const content = picks.length
     ? [{ type: 'text', text: modelText }, ...picks.map((a) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: readShot(thread.id, a.file).toString('base64') } }))]
     : modelText;
 
   // Per-turn state for the done-check.
-  const turn = { editedAt: 0, verifiedAt: 0, interrupted: false, guarded: false };
+  const turn = { editedAt: 0, verifiedAt: 0, interrupted: false, guarded: false, checkProject: onTurnEnd };
 
   let finish;
   const done = new Promise((r) => { finish = r; });
@@ -367,6 +386,7 @@ export async function runTurn({ thread, project, text, attachments = [], overrid
         // for non-web projects, or when nothing was edited.
         Stop: [{
           hooks: [async (hin) => {
+            turn.checkProject?.(); // the turn may just have turned an empty folder into a browser game
             if (hin.stop_hook_active || turn.guarded || turn.interrupted || !project.web || permissionMode === 'plan') return {};
             if (!turn.editedAt || turn.verifiedAt > turn.editedAt) return {};
             turn.guarded = true;
@@ -418,6 +438,7 @@ export async function runTurn({ thread, project, text, attachments = [], overrid
         emit({ type: 'result', isError: m.is_error, text: m.is_error ? (m.result ?? m.subtype) : '', turnMs: m.duration_ms, usage: thread.usage, turn: turnUsage, ctx: thread.lastContextTokens, turnId, changed: turnFiles(thread.id, turnId) });
         gotResult = true;
         entry.resultSeen = true;
+        try { onTurnEnd?.(); } catch { /* best effort: refresh the engine right away so the UI updates */ }
         broadcast({ type: 'running', threadId: thread.id, running: false });
         finish();
       }

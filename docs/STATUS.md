@@ -43,6 +43,18 @@ Phase 2 is merged into `main`.
 - Screenshots are stored as files (`data/shots/<thread>/`) and served at `/api/shots/...`.
 - Regression (perm-test, verify-test, reject-test, router test) pass.
 
+## Tryout after Phase 3 (branch `fix/new-game-checks`)
+- `scripts/tryout.mjs` (longer playtest, real change + review + undo, new game) and `scripts/new-game-test.mjs`.
+- Fixed: a game created in an empty folder was not checked in the turn that created it (tools only existed for
+  web projects). Game tools now also exist for "unknown" projects and re-detect the engine when used; the
+  done-check re-detects too; the engine refresh runs right at the result.
+- Fixed: progress notes were skipped for new games; the hint now goes into the message itself.
+- Playtest tool tells Claude to read a whole object first to learn field names.
+- Result: snake game from an empty folder in one Haiku turn ($0.006): notes → build → verify (it saw the start
+  text overlapping the snake and fixed it) → playtest → notes updated.
+- The done-check is a nudge: when the user explicitly says "don't check", Claude may decline once and stop.
+- The release build is NOT rebuilt with this fix yet (the user's open Forge locks the release folder).
+
 ## Not started (needs the user's decision: other systems / network)
 - Blender MCP + asset pipeline, phone approvals (LAN/Tailscale, needs API auth), Godot/Unity via MCP.
 
