@@ -209,6 +209,7 @@ async function openThread(id) {
   $('#col').innerHTML = '';
   live = null; liveText = '';
   picks = []; renderPicks();
+  if (!$('#viewer').hidden) import('/viewer.js').then((v) => v.closeViewer());
   toolEls.clear();
   const events = await api(`/api/threads/${id}/events`);
   if (!events.length) $('#col').innerHTML = `<div class="empty"><b>${esc(projectOf(t)?.name)}</b><br>Ask for a change, a fix or a new feature.<br><span class="small">Quick tweaks go to Haiku, normal work to Sonnet, hard problems to Opus.</span></div>`;
@@ -374,6 +375,11 @@ function renderEvent(ev, replay = false) {
       el.className = 'turnMeta';
       el.innerHTML = `↺ Undid ${ev.turns?.length ?? 1} turn${ev.turns?.length === 1 ? '' : 's'} · restored ${ev.files?.length ? ev.files.map((f) => `<code>${esc(f)}</code>`).join(' ') : 'nothing'}. Claude will be told on your next message.`;
       break;
+    case 'models':
+      el.className = 'changes';
+      el.innerHTML = `${icon('image')}<span>${ev.files.length} 3D model${ev.files.length === 1 ? '' : 's'} written: ${ev.files.map((f) => `<code>${esc(f)}</code>`).join(' ')}</span>
+        ${ev.files.map((f) => `<button class="btn small" data-view3d="${esc(f)}" data-project="${esc(ev.projectId)}">View ${esc(f.split('/').pop())} in 3D</button>`).join('')}`;
+      break;
     case 'rejected':
       el.className = 'turnMeta';
       el.innerHTML = `✕ Rejected this thread's changes to <code>${esc(ev.file)}</code>; it is back to how it was. Claude will be told on your next message.`;
@@ -395,6 +401,15 @@ function onDelta(text) {
 }
 
 $('#col').addEventListener('click', async (e) => {
+  const v3 = e.target.closest('[data-view3d]');
+  if (v3) {
+    setPanel(true);
+    document.querySelector('.tabs button[data-tab="assets"]').click();
+    const f = v3.dataset.view3d;
+    const { openViewer } = await import('/viewer.js');
+    openViewer($('#viewer'), `${gameBase()}/files/${v3.dataset.project}/${f.split('/').map(encodeURIComponent).join('/')}`, f);
+    return;
+  }
   const u = e.target.closest('[data-undo]');
   if (u) {
     const ch = u.closest('.changes');
@@ -503,7 +518,14 @@ async function setBlender(on) {
   if (tab === 'assets') loadTab();
 }
 $('#optBlender').addEventListener('change', (e) => setBlender(e.target.checked));
-$('#assets').addEventListener('click', (e) => { if (e.target.id === 'blendOn') setBlender(true); });
+$('#assets').addEventListener('click', async (e) => {
+  if (e.target.id === 'blendOn') return setBlender(true);
+  const m = e.target.closest('.asset.viewable');
+  if (m) {
+    const { openViewer } = await import('/viewer.js'); // loads three.js only when a model is opened
+    openViewer($('#viewer'), m.dataset.url, m.dataset.name);
+  }
+});
 
 async function handoff() {
   const t = thread();
@@ -635,7 +657,8 @@ async function loadTab() {
     const ic = { model: '🧊', audio: '🔊', font: '🔤', scene: '🎬', other: '📄', image: '🖼' };
     const blends = list.filter((a) => /\.blend$/i.test(a.path)).length;
     const hint = blends && !p.blender ? `<div class="blendHint">${blends} Blender file${blends === 1 ? '' : 's'} here. <button class="btn small" id="blendOn">Turn on the Blender helper</button><span class="dim small">Claude can then inspect your open Blender scene and export models into this game.</span></div>` : '';
-    $('#assets').innerHTML = hint + (list.length ? list.map((a) => `<div class="asset" title="${esc(a.path)} · ${Math.round(a.size / 1024)}KB">
+    const fileUrl = (a) => `${gameBase()}/files/${p.id}/${a.path.split('/').map(encodeURIComponent).join('/')}`;
+    $('#assets').innerHTML = hint + (list.length ? list.map((a) => `<div class="asset${/\.(glb|gltf)$/i.test(a.path) ? ' viewable' : ''}" title="${esc(a.path)} · ${Math.round(a.size / 1024)}KB${/\.(glb|gltf)$/i.test(a.path) ? ' · click to view in 3D' : ''}" data-url="${esc(fileUrl(a))}" data-name="${esc(a.path)}">
       ${a.kind === 'image' && !/\.(psd|exr|hdr|ktx2)$/i.test(a.path) ? `<img loading="lazy" src="${gameBase()}/files/${p.id}/${a.path.split('/').map(encodeURIComponent).join('/')}" alt="">` : `<div class="ic">${ic[a.kind]}</div>`}
       ${esc(a.path.split('/').pop())}</div>`).join('') : '<p class="dim small">No asset files found.</p>');
   } else if (tab === 'diff') {

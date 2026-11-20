@@ -60,7 +60,22 @@ Phase 2 is merged into `main`.
   read-only tools auto-allowed, $0.033) and `scripts/blender-shot-test.mjs` (viewport screenshot, $0.016).
   Blender stayed unchanged (is_dirty false). Images that any non-Forge tool returns (e.g. Blender screenshots
   seen by the helper) are now saved and shown in the chat.
-- Not tested yet: exporting a model (needs execute_blender_code, which asks for approval).
+- Export tested (`scripts/blender-export-test.mjs`, branch `feat/model-viewer`): the helper exported the default
+  Cube as `models/cube.glb` (1,936 bytes) after one approval of execute_blender_code; it restored the selection;
+  Blender stayed unchanged (is_dirty false). Claude now confirms exports with list_assets.
+- Files written by Blender are not in Forge's Undo checkpoints (they are not Edit/Write).
+
+## 3D model viewer (branch `feat/model-viewer`)
+- Assets tab: click a .glb/.gltf to orbit it (three.js 0.170 served locally from node_modules at /vendor/three).
+  Shows triangles, meshes, materials, textures, size, and plays animation clips. Animation-only files show the
+  skeleton. Turns that write models show a "View … in 3D" card in the chat.
+- Tested on copies of HorseWar models: horse_lod0.glb (7,000 triangles), horse_anim.glb (28 bones, Gallop/Stand/Down).
+
+## GitHub
+- Remote `origin` = https://Dextonek@github.com/Dextonek/forge.git (PUBLIC). Pushes go as **Dextonek** through a
+  repo-local credential helper that asks `gh auth token --user Dextonek` at push time (no token stored). The global
+  gh active account stays penkert-adus. (The SSH key on this machine is penkert-adus, which only has read access.)
+- `main` pushed at b08542f (Blender helper). Branch `feat/model-viewer` is local and uncommitted.
 - Uses the Blender MCP from the Claude desktop app's Blender extension
   (`%APPDATA%\Claude\Claude Extensions\ant.dir.gh.blender.blender-mcp\.venv\Scripts\blender-mcp.exe`, or
   `FORGE_BLENDER_MCP`). Blender's add-on server listens on localhost:9876 (`FORGE_BLENDER_PORT`).

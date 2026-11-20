@@ -6,7 +6,7 @@ import path from 'node:path';
 import { appendEvent, save, newId, readBrief, briefPath, appendUsage, DATA_DIR } from './store.mjs';
 import { engineHint, BINARY_GLOBS } from './engine.mjs';
 import { TIERS, routeMessage } from './router.mjs';
-import { assetSummary, getErrors, formatErrors, probeConnected, probeConnectedAs, probeCommand, waitForLoad } from './game.mjs';
+import { assetSummary, listAssets, getErrors, formatErrors, probeConnected, probeConnectedAs, probeCommand, waitForLoad } from './game.mjs';
 import { opusRatio, tierOf } from './models.mjs';
 import { beginTurn, backupFile, turnFiles } from './checkpoints.mjs';
 import { saveShot, shotUrl, readShot } from './shots.mjs';
@@ -197,7 +197,7 @@ function systemAppend(project) {
     project.web ? '- After changing the game, call mcp__forge__verify_game (reloads the preview, returns runtime errors and a screenshot) and fix what it shows before you finish. Use mcp__forge__game_eval to inspect live state instead of guessing. To check gameplay (controls, menus, level-ups), use mcp__forge__playtest with a short input script and read steps.' : '',
     '- Project progress notes are kept with mcp__forge__progress (not in the game folder). Read them at the start of a new task if they are not already in the conversation; after finishing a feature or making a decision, write the updated notes.',
     '- If the project is nearly empty and has no progress notes, first write a short feature list with mcp__forge__progress, scaffold the game, then build the features one at a time.',
-    project.blender ? '- Blender is connected through the `blender` agent: delegate inspecting .blend scenes, viewport screenshots, model changes and exporting models to the game (glTF .glb) to it. Never ask it to open other files or save the .blend unless the user asked.' : '',
+    project.blender ? '- Blender is connected through the `blender` agent: delegate inspecting .blend scenes, viewport screenshots, model changes and exporting models to the game (glTF .glb) to it. Never ask it to open other files or save the .blend unless the user asked. After an export, confirm the file with mcp__forge__list_assets (it lists models with sizes).' : '',
     '- Keep replies short: what changed, where, and anything the user must check.',
     brief ? `\n## Project brief\n${brief}` : '',
   ].filter(Boolean).join('\n');
@@ -255,6 +255,16 @@ function recordTurnUsage(thread, m, { tier, ctx, kind = 'turn' }) {
 }
 
 export function isRunning(threadId) { const r = running.get(threadId); return !!r && !r.resultSeen; }
+
+// .glb/.gltf files in the game folder -> modified time (to spot models a turn created or changed).
+function modelFiles(dir) {
+  const out = new Map();
+  for (const a of listAssets(dir)) {
+    if (!/\.(glb|gltf)$/i.test(a.path)) continue;
+    try { out.set(a.path, fs.statSync(path.join(dir, a.path)).mtimeMs); } catch { /* gone */ }
+  }
+  return out;
+}
 
 // At most two small files (e.g. a README) and no folders other than dot-folders.
 function isNearlyEmpty(dir) {
@@ -314,6 +324,7 @@ export async function runTurn({ thread, project, text, attachments = [], overrid
   const effort = thread.effort && thread.effort !== 'auto' ? thread.effort : tier.effort;
   const permissionMode = PERM_MODES.includes(thread.permMode) ? thread.permMode : thread.autoEdits ? 'acceptEdits' : 'default';
   const turnId = beginTurn(thread.id, thread.cwd); // file checkpoint for "Undo this turn"
+  const modelsBefore = modelFiles(thread.cwd);     // to show 3D models this turn created or changed
   emit({ type: 'user', text, tier: route.tier, reason: route.reason, model, effort, permissionMode, turnId,
     picks: picks.map((a) => ({ src: shotUrl(thread.id, a.file), label: a.objects?.[0] ? `${a.objects[0].type}${a.objects[0].name ? ` "${String(a.objects[0].name).slice(0, 40)}"` : ''}` : `point ${a.x},${a.y}` })) });
 
@@ -465,6 +476,10 @@ export async function runTurn({ thread, project, text, attachments = [], overrid
         if (m.session_id && !m.is_error) thread.sessionId = m.session_id;
         thread.updated = Date.now();
         save();
+        // 3D models written during the turn (e.g. exported by the Blender helper; such files are not in the
+        // Edit checkpoints, so Undo does not cover them).
+        const models = [...modelFiles(thread.cwd)].filter(([p, mt]) => modelsBefore.get(p) !== mt).map(([p]) => p);
+        if (models.length) emit({ type: 'models', files: models.slice(0, 8), projectId: project.id });
         emit({ type: 'result', isError: m.is_error, text: m.is_error ? (m.result ?? m.subtype) : '', turnMs: m.duration_ms, usage: thread.usage, turn: turnUsage, ctx: thread.lastContextTokens, turnId, changed: turnFiles(thread.id, turnId) });
         gotResult = true;
         entry.resultSeen = true;

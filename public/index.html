@@ -118,7 +118,7 @@
       <div class="sectionTitle">Runtime errors <span id="errCount" class="pill">0</span></div>
       <ul id="errors" class="errors"></ul>
     </div>
-    <div id="tab-assets" class="tab" hidden><div id="assets"></div></div>
+    <div id="tab-assets" class="tab" hidden><div id="viewer" class="viewer" hidden></div><div id="assets"></div></div>
     <div id="tab-diff" class="tab" hidden>
       <div class="row"><span class="dim small grow">Changes this thread made. Click a line to comment on it.</span><button class="btn small" id="refreshDiff">Refresh</button></div>
       <div id="changes"></div>
@@ -149,6 +149,7 @@
     <div id="tRecent"></div>
   </div>
 </section>
+<script type="importmap">{ "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/" } }</script>
 <script src="/app.js" type="module"></script>
 </body>
 </html>

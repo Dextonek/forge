@@ -274,6 +274,13 @@ const server = http.createServer(async (req, res) => {
       if (req.method !== 'GET' && !String(req.headers['content-type'] ?? '').startsWith('application/json')) return res.writeHead(415).end();
       return await api(req, res, parts.slice(1));
     }
+    // three.js for the model viewer, served from node_modules (only its build and example modules).
+    if (url.pathname.startsWith('/vendor/three/')) {
+      const rel = url.pathname.slice('/vendor/three/'.length);
+      const f = /^(build|examples\/jsm)\//.test(rel) && safeJoin(path.join(HERE, '..', 'node_modules', 'three'), rel);
+      if (!f) return res.writeHead(404).end();
+      return fs.readFile(f, (err, buf) => (err ? res.writeHead(404).end() : res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'max-age=86400' }).end(buf)));
+    }
     // The router is shared with the browser so the UI can preview which model a message will use.
     const file = url.pathname === '/router.mjs' ? path.join(HERE, 'router.mjs')
       : safeJoin(PUBLIC, url.pathname === '/' ? 'index.html' : url.pathname.slice(1));
@@ -314,6 +321,8 @@ const gameServer = http.createServer((req, res) => {
   if (parts[0] === 'files' && parts[1]) {        // raw asset files for thumbnails (no probe)
     const project = findProject(parts[1]);
     if (!project) return res.writeHead(404).end();
+    // Forge's own page (the model viewer) may fetch asset files; game pages are same-origin anyway.
+    if (OK_ORIGINS.has(req.headers.origin)) res.setHeader('Access-Control-Allow-Origin', req.headers.origin);
     return serveGame(res, project.path, project.id, parts.slice(2).join('/'), false);
   }
   res.writeHead(404).end();
